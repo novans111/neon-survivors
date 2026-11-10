@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: neon-survivors
-    runtime: python
-    buildCommand: "echo 'No build step needed'"
-    startCommand: "python3 server.py"
-    plan: free
