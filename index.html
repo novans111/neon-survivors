@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEON SURVIVORS</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+
+  <!-- ВЕРХНИЙ БАР В ИГРЕ (HUD) -->
+  <div id="hud" class="hidden">
+    <div class="xp-bar-container">
+      <div id="xpBarFill" class="xp-bar-fill"></div>
+      <span id="xpLevelText" class="xp-level-text">УР. 1</span>
+    </div>
+
+    <div class="hud-top-row">
+      <div class="hud-left">
+        <div class="hp-bar-box">
+          <div id="hudHpFill" class="hp-bar-fill"></div>
+          <span id="hudHpText">100 / 100 HP</span>
+        </div>
+        <div id="inventoryBar" class="inventory-bar"></div>
+      </div>
+
+      <div class="hud-center">
+        <div id="hudTimer" class="hud-timer">00:00</div>
+        <div id="waveBanner" class="wave-banner">Волна 1</div>
+      </div>
+
+      <div class="hud-right">
+        <div class="stat-pill"><span class="stat-icon">💀</span> <span id="hudKills">0</span></div>
+        <div class="stat-pill gold-pill"><span class="stat-icon">🪙</span> <span id="hudGold">0</span></div>
+        <div class="stat-pill score-pill"><span class="stat-icon">⭐</span> <span id="hudScore">0</span></div>
+        <button id="btnMuteHud" class="icon-btn" title="Звук Вкл/Выкл">🔊</button>
+        <button id="btnPauseHud" class="icon-btn" title="Пауза (ESC)">⏸</button>
+      </div>
+    </div>
+
+    <div id="bossBarWrap" class="boss-bar-wrap hidden">
+      <div class="boss-name" id="bossNameText">АРХОНТ ПУСТОТЫ</div>
+      <div class="boss-hp-track">
+        <div id="bossHpFill" class="boss-hp-fill"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ОКНО АВТОРИЗАЦИИ -->
+  <div id="authScreen" class="overlay-screen">
+    <div class="auth-card glass-panel">
+      <div class="logo-block">
+        <h1 class="neon-title">NEON SURVIVORS</h1>
+        <p class="subtitle">Выживи среди бесконечного роя пустоты</p>
+      </div>
+
+      <div class="auth-tabs">
+        <button id="tabLogin" class="tab-btn active">Вход</button>
+        <button id="tabRegister" class="tab-btn">Регистрация</button>
+      </div>
+
+      <form id="authForm" class="auth-form">
+        <label class="field-label">
+          Логин игрока
+          <input type="text" id="authUsername" placeholder="Например: stalker77" minlength="3" maxlength="20" required autocomplete="username" />
+        </label>
+        <label class="field-label">
+          Пароль
+          <input type="password" id="authPassword" placeholder="Минимум 4 символа" minlength="4" required autocomplete="current-password" />
+        </label>
+        <div id="authError" class="error-box hidden"></div>
+        <button type="submit" id="authSubmitBtn" class="primary-btn big-btn">Войти в игру</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ГЛАВНОЕ МЕНЮ / ХАБ -->
+  <div id="menuScreen" class="overlay-screen hidden">
+    <div class="hub-container glass-panel">
+      <header class="hub-header">
+        <div>
+          <h1 class="neon-title small">NEON SURVIVORS</h1>
+          <p class="user-greeting">Охотник: <strong id="menuUsername">—</strong></p>
+        </div>
+        <div class="hub-header-actions">
+          <div class="gold-display">🪙 <span id="menuGold">0</span> золота</div>
+          <button id="btnMuteMenu" class="secondary-btn">🔊 Звук</button>
+          <button id="btnLogout" class="secondary-btn danger-outline">Выйти</button>
+        </div>
+      </header>
+
+      <div class="hub-grid">
+        <!-- Левая колонка: Выбор стартового оружия + Старт -->
+        <section class="hub-section">
+          <h2>1. Выбери стартовое оружие</h2>
+          <div id="starterWeaponsGrid" class="starter-grid"></div>
+
+          <div class="player-summary-strip">
+            <div>🏆 Рекорд: <strong id="statBestScore">0</strong></div>
+            <div>⏱ Макс. время: <strong id="statBestTime">00:00</strong></div>
+            <div>💀 Всего фрагов: <strong id="statTotalKills">0</strong></div>
+            <div>🎮 Забегов: <strong id="statTotalRuns">0</strong></div>
+          </div>
+
+          <button id="btnStartRun" class="primary-btn start-run-btn">⚔ НАЧАТЬ ЗАБЕГ</button>
+          <p class="controls-hint">Управление: <b>WASD / Стрелки</b> или <b>Мышь (зажать ЛКМ)</b> • Пауза: <b>ESC / P</b></p>
+        </section>
+
+        <!-- Средняя колонка: Постоянная прокачка (Мета-магазин в SQLite) -->
+        <section class="hub-section">
+          <h2>2. Кузница (Постоянные бонусы)</h2>
+          <p class="section-note">Прокачка сохраняется в БД SQLite для вашего аккаунта.</p>
+          <div id="shopList" class="shop-list"></div>
+        </section>
+
+        <!-- Правая колонка: Таблица лидеров и История забегов -->
+        <section class="hub-section">
+          <div class="subtabs">
+            <button id="subtabLeaderboard" class="subtab-btn active">🏆 Топ игроков</button>
+            <button id="subtabHistory" class="subtab-btn">📜 Мои забеги</button>
+          </div>
+          <div id="leaderboardContainer" class="table-scroll"></div>
+          <div id="historyContainer" class="table-scroll hidden"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА ПОВЫШЕНИЯ УРОВНЯ -->
+  <div id="levelUpModal" class="overlay-screen modal-backdrop hidden">
+    <div class="levelup-card glass-panel">
+      <div class="levelup-badge">НОВЫЙ УРОВЕНЬ!</div>
+      <h2 id="levelUpTitle">Выберите улучшение</h2>
+      <div id="upgradeChoices" class="choices-grid"></div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА ПАУЗЫ -->
+  <div id="pauseModal" class="overlay-screen modal-backdrop hidden">
+    <div class="summary-card glass-panel">
+      <h2>ПАУЗА</h2>
+      <p class="subtitle">Игра приостановлена</p>
+      <div class="modal-actions">
+        <button id="btnResumeGame" class="primary-btn">Продолжить (ESC)</button>
+        <button id="btnEndRunEarly" class="secondary-btn danger-outline">Завершить забег и сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА ИТОГОВ ЗАБЕГА (GAME OVER) -->
+  <div id="gameOverModal" class="overlay-screen modal-backdrop hidden">
+    <div class="summary-card glass-panel">
+      <h2 id="gameOverTitle" class="gameover-title">ВЫ ПАЛИ В БОЮ</h2>
+      <p id="saveStatusText" class="subtitle">Результаты сохранены в базу данных</p>
+
+      <div class="summary-stats-grid">
+        <div class="summary-stat">
+          <span>Время выживания</span>
+          <strong id="sumTime">00:00</strong>
+        </div>
+        <div class="summary-stat">
+          <span>Уничтожено врагов</span>
+          <strong id="sumKills">0</strong>
+        </div>
+        <div class="summary-stat">
+          <span>Достигнутый уровень</span>
+          <strong id="sumLevel">1</strong>
+        </div>
+        <div class="summary-stat gold">
+          <span>Добыто золота</span>
+          <strong id="sumGold">+0 🪙</strong>
+        </div>
+        <div class="summary-stat score full-span">
+          <span>Итоговый счёт</span>
+          <strong id="sumScore">0</strong>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button id="btnPlayAgain" class="primary-btn">⚔ Сыграть снова</button>
+        <button id="btnBackToMenu" class="secondary-btn">🏠 В меню и Кузницу</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+  <script src="./game.js"></script>
+</body>
+</html>
