@@ -296,9 +296,123 @@ function buildBrowserUserProfile(db, userRow) {
   };
 }
 
+function handlePureLocalDbApi(path, method, body) {
+  const raw = safeGetStorage("ns_pure_db");
+  const store = raw ? JSON.parse(raw) : { users: [], sessions: {}, runs: [] };
+  const save = () => safeSetStorage("ns_pure_db", JSON.stringify(store));
+  const defaultUpgrades = { max_hp: 0, move_speed: 0, damage: 0, magnet: 0, greed: 0 };
+
+  const buildProfile = (u) => {
+    const myRuns = store.runs.filter((r) => r.user_id === u.id).slice().reverse();
+    return {
+      id: u.id,
+      username: u.username,
+      gold: u.gold || 0,
+      upgrades: { ...defaultUpgrades, ...(u.upgrades || {}) },
+      upgrade_Config: LOCAL_UPGRADE_CONFIG,
+      stats: {
+        total_runs: myRuns.length,
+        best_score: myRuns.reduce((m, r) => Math.max(m, r.score), 0),
+        best_time: myRuns.reduce((m, r) => Math.max(m, r.survival_time), 0),
+        best_kills: myRuns.reduce((m, r) => Math.max(m, r.kills), 0),
+        total_kills: myRuns.reduce((s, r) => s + r.kills, 0),
+      },
+      recent_runs: myRuns.slice(0, 10),
+    };
+  };
+
+  const getAuthUser = () => {
+    const uid = store.sessions[appState.token];
+    return store.users.find((x) => x.id === uid) || null;
+  };
+
+  if (path === "/api/me") {
+    const u = getAuthUser();
+    if (!u) throw new Error("Не авторизован");
+    return { user: buildProfile(u) };
+  }
+  if (path === "/api/leaderboard") {
+    const topRuns = store.runs
+      .slice()
+      .sort((a, b) => b.score - a.score || b.survival_time - a.survival_time)
+      .slice(0, 15);
+    return { top_runs: topRuns, best_players: [] };
+  }
+  if (path === "/api/register") {
+    const username = String((body && body.username) || "").trim();
+    const password = String((body && body.password) || "");
+    if (username.length < 3) throw new Error("Логин должен быть от 3 символов");
+    if (password.length < 4) throw new Error("Пароль должен быть от 4 символов");
+    if (store.users.some((x) => x.username.toLowerCase() === username.toLowerCase())) {
+      throw new Error("Пользователь уже существует");
+    }
+    const u = { id: store.users.length + 1, username, password, gold: 0, upgrades: { ...defaultUpgrades } };
+    store.users.push(u);
+    const token = "tok_" + Math.random().toString(36).slice(2);
+    store.sessions[token] = u.id;
+    save();
+    return { token, user: buildProfile(u) };
+  }
+  if (path === "/api/login") {
+    const username = String((body && body.username) || "").trim();
+    const password = String((body && body.password) || "");
+    const u = store.users.find((x) => x.username.toLowerCase() === username.toLowerCase() && x.password === password);
+    if (!u) throw new Error("Неверный логин или пароль");
+    const token = "tok_" + Math.random().toString(36).slice(2);
+    store.sessions[token] = u.id;
+    save();
+    return { token, user: buildProfile(u) };
+  }
+  if (path === "/api/logout") {
+    delete store.sessions[appState.token];
+    save();
+    return { ok: true };
+  }
+  if (path === "/api/upgrade") {
+    const u = getAuthUser();
+    if (!u) throw new Error("Не авторизован");
+    const key = body && body.upgrade;
+    const cfg = LOCAL_UPGRADE_CONFIG[key];
+    const lvl = (u.upgrades && u.upgrades[key]) || 0;
+    const cost = Math.round(cfg.base_cost * Math.pow(cfg.cost_mult, lvl));
+    if (u.gold < cost) throw new Error("Недостаточно золота");
+    u.gold -= cost;
+    u.upgrades = u.upgrades || {};
+    u.upgrades[key] = lvl + 1;
+    save();
+    return { user: buildProfile(u) };
+  }
+  if (path === "/api/runs") {
+    const u = getAuthUser();
+    if (!u) throw new Error("Не авторизован");
+    const survival_time = Math.max(0, Number((body && body.survival_time) || 0));
+    const kills = Math.max(0, Number((body && body.kills) || 0));
+    const level_reached = Math.max(1, Number((body && body.level_reached) || 1));
+    const gold_earned = Math.max(0, Number((body && body.gold_earned) || 0));
+    const score = kills * 10 + survival_time * 5 + level_reached * 50 + gold_earned * 2;
+    store.runs.push({
+      id: store.runs.length + 1,
+      user_id: u.id,
+      username: u.username,
+      weapon: String((body && body.weapon) || "wand"),
+      score,
+      survival_time,
+      kills,
+      level_reached,
+      gold_earned,
+    });
+    u.gold = (u.gold || 0) + gold_earned;
+    save();
+    return { score, user: buildProfile(u) };
+  }
+  throw new Error("Маршрут не найден");
+}
+
 async function handleBrowserSqliteApi(path, method, body) {
   const db = await getBrowserSqlite();
-  if (!db) throw new Error("SQLite не инициализирована");
+  if (!db) {
+    return handlePureLocalDbApi(path, method, body);
+  }
 
   const getAuthUser = () => {
     if (!appState.token) return null;
@@ -1261,13 +1375,161 @@ function handleEnemyDeath(e) {
 }
 
 // ============================================================================
-// ПРОКАЧКА УРОВНЯ ВО ВРЕМЯ ЗАБЕГА
+// ПРОКАЧКА УРОВНЯ ВО ВРЕМЯ ЗАБЕГА + ВИКТОРИНА «ПРОВЕРКА НА УМНИ»
 // ============================================================================
+const QUIZ_QUESTIONS = [
+  {
+    q: "Какой SQL-оператор используется для выборки данных из таблицы?",
+    a: "SELECT",
+    w: ["INSERT", "UPDATE", "FETCH"],
+  },
+  {
+    q: "Как расшифровывается СУБД?",
+    a: "Система управления базами данных",
+    w: ["Сервер удалённых баз данных", "Сеть универсальных блоков данных", "Служба упаковки больших данных"],
+  },
+  {
+    q: "Что делает ограничение PRIMARY KEY в таблице SQLite?",
+    a: "Уникально идентифицирует каждую запись в таблице",
+    w: ["Шифрует пароли пользователей", "Сортирует таблицу по алфавиту", "Разрешает хранить только текст"],
+  },
+  {
+    q: "Где SQLite хранит всю базу данных?",
+    a: "В одном обычном файле на диске (или в памяти)",
+    w: ["Только на облачном сервере Microsoft", "В реестре Windows", "В отдельных папках для каждой строки"],
+  },
+  {
+    q: "Какая команда SQL добавляет новую строку в таблицу?",
+    a: "INSERT INTO",
+    w: ["ADD ROW", "APPEND TO", "CREATE ROW"],
+  },
+  {
+    q: "Какая команда SQL удаляет строки из таблицы по условию?",
+    a: "DELETE FROM",
+    w: ["REMOVE", "DROP COLUMN", "ERASE"],
+  },
+  {
+    q: "Какое ключевое слово SQL используется для фильтрации строк по условию?",
+    a: "WHERE",
+    w: ["FILTER", "WHEN", "SEARCH"],
+  },
+  {
+    q: "Какой оператор SQL объединяет строки из двух таблиц по связующему полю?",
+    a: "JOIN",
+    w: ["MERGE", "LINK", "COMBINE"],
+  },
+  {
+    q: "Чему равно 2 в 10-й степени (2¹⁰)?",
+    a: "1024",
+    w: ["512", "2048", "1000"],
+  },
+  {
+    q: "Сколько бит в одном байте?",
+    a: "8",
+    w: ["16", "4", "10"],
+  },
+  {
+    q: "Какой HTTP-код означает «Страница не найдена»?",
+    a: "404",
+    w: ["500", "200", "403"],
+  },
+  {
+    q: "Какой HTTP-метод обычно используется для отправки данных формы (авторизации)?",
+    a: "POST",
+    w: ["GET", "HEAD", "OPTIONS"],
+  },
+  {
+    q: "Какая сложность бинарного поиска в отсортированном массиве из N элементов?",
+    a: "O(log N)",
+    w: ["O(N²)", "O(N)", "O(1)"],
+  },
+  {
+    q: "Какой тип данных в Python является неизменяемым (immutable)?",
+    a: "tuple (кортеж)",
+    w: ["list (список)", "dict (словарь)", "set (множество)"],
+  },
+  {
+    q: "Какая функция SQL возвращает количество строк?",
+    a: "COUNT(*)",
+    w: ["SUM(*)", "TOTAL()", "LENGTH()"],
+  },
+  {
+    q: "Какое ключевое слово SQL сортирует результаты по убыванию?",
+    a: "ORDER BY ... DESC",
+    w: ["SORT BY ... DOWN", "GROUP BY ... LOW", "ALIGN ... REVERSE"],
+  },
+  {
+    q: "Что означает буква A в принципе ACID для транзакций БД?",
+    a: "Atomicity (Атомарность)",
+    w: ["Authorization (Авторизация)", "Availability (Доступность)", "Automation (Автоматизация)"],
+  },
+  {
+    q: "Какой тег HTML5 используется для рисования 2D/3D графики через JS?",
+    a: "<canvas>",
+    w: ["<paint>", "<render>", "<screen>"],
+  },
+  {
+    q: "Чему равен квадратный корень из 144?",
+    a: "12",
+    w: ["14", "11", "16"],
+  },
+  {
+    q: "Какой протокол работает поверх TCP и шифрует веб-трафик с помощью TLS?",
+    a: "HTTPS",
+    w: ["FTP", "UDP", "ARP"],
+  },
+  {
+    q: "Как называется внешний ключ для связи таблиц в реляционной БД?",
+    a: "FOREIGN KEY",
+    w: ["OUTER KEY", "REMOTE KEY", "SECOND KEY"],
+  },
+  {
+    q: "Что выведет выражение Python: len('SQLite')?",
+    a: "6",
+    w: ["5", "7", "0"],
+  },
+  {
+    q: "Какая структура данных работает по принципу LIFO (последним пришёл — первым ушёл)?",
+    a: "Стек (Stack)",
+    w: ["Очередь (Queue)", "Хеш-таблица", "Дерево"],
+  },
+  {
+    q: "Чему равно 7 × 8?",
+    a: "56",
+    w: ["54", "48", "64"],
+  },
+];
+
+let usedQuizIndices = new Set();
+
+function pickQuizQuestion() {
+  if (usedQuizIndices.size >= QUIZ_QUESTIONS.length) {
+    usedQuizIndices.clear();
+  }
+  const available = [];
+  for (let i = 0; i < QUIZ_QUESTIONS.length; i++) {
+    if (!usedQuizIndices.has(i)) available.push(i);
+  }
+  const idx = available[Math.floor(Math.random() * available.length)];
+  usedQuizIndices.add(idx);
+  const item = QUIZ_QUESTIONS[idx];
+
+  const options = [
+    { text: item.a, correct: true },
+    ...item.w.map((txt) => ({ text: txt, correct: false })),
+  ];
+  for (let i = options.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [options[i], options[j]] = [options[j], options[i]];
+  }
+  return { question: item.q, options };
+}
+
 function gainXp(amount) {
   const p = game.player;
   p.xp += amount;
   sfx.gem();
-  while (p.xp >= p.xpToNext) {
+  if (p.xp >= p.xpToNext && !game.choosingUpgrade) {
     p.xp -= p.xpToNext;
     p.level++;
     p.xpToNext = Math.round(10 + p.level * 8 + Math.pow(p.level, 1.35));
@@ -1330,12 +1592,13 @@ function buildUpgradePool() {
   return choices;
 }
 
-function openLevelUpModal() {
-  game.choosingUpgrade = true;
-  sfx.levelUp();
+function renderUpgradeCards() {
+  const titleEl = document.getElementById("levelUpTitle");
+  titleEl.innerHTML = `<span style="color:#06d6a0">✔ ВЕРНО! Выберите улучшение:</span>`;
 
   const choices = buildUpgradePool();
   const container = document.getElementById("upgradeChoices");
+  container.style.gridTemplateColumns = "";
   container.innerHTML = "";
 
   choices.forEach((ch) => {
@@ -1351,6 +1614,64 @@ function openLevelUpModal() {
     card.addEventListener("click", () => {
       applyUpgradeChoice(ch);
     });
+    container.appendChild(card);
+  });
+}
+
+function openLevelUpModal() {
+  game.choosingUpgrade = true;
+  sfx.levelUp();
+
+  const quiz = pickQuizQuestion();
+  const titleEl = document.getElementById("levelUpTitle");
+  titleEl.innerHTML = `
+    <div style="font-size:0.85rem;color:#ffd166;margin-bottom:6px;letter-spacing:0.5px;">
+      🧠 ВОПРОС НА ПРОКАЧКУ (Ошибка = пропуск улучшения!)
+    </div>
+    <div style="font-size:1.18rem;line-height:1.35;color:#eef2ff;">${escapeHtml(quiz.question)}</div>
+  `;
+
+  const container = document.getElementById("upgradeChoices");
+  container.style.gridTemplateColumns = "1fr 1fr";
+  container.innerHTML = "";
+
+  let answered = false;
+
+  quiz.options.forEach((opt, idx) => {
+    const card = document.createElement("div");
+    card.className = "choice-card";
+    card.style.padding = "16px 14px";
+    card.style.justifyContent = "center";
+    const letter = ["A", "B", "C", "D"][idx];
+    card.innerHTML = `
+      <div class="choice-tag">${letter}</div>
+      <div class="choice-title" style="font-size:1rem;">${escapeHtml(opt.text)}</div>
+    `;
+
+    card.addEventListener("click", () => {
+      if (answered) return;
+      answered = true;
+
+      if (opt.correct) {
+        sfx.levelUp();
+        renderUpgradeCards();
+      } else {
+        sfx.hurt();
+        card.style.borderColor = "#ef4444";
+        card.style.background = "rgba(239, 68, 68, 0.25)";
+        titleEl.innerHTML = `<span style="color:#ef4444">✖ НЕВЕРНО! Улучшение уровня пропущено!</span>`;
+        if (game.player) {
+          addFloatingText(game.player.x, game.player.y - 36, "✖ НЕВЕРНО! СКИП УЛУЧШЕНИЯ!", "#ef4444", 17);
+        }
+        setTimeout(() => {
+          levelUpModal.classList.add("hidden");
+          container.style.gridTemplateColumns = "";
+          game.choosingUpgrade = false;
+          updateHud();
+        }, 850);
+      }
+    });
+
     container.appendChild(card);
   });
 
