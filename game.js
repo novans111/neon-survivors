@@ -753,10 +753,27 @@ function renderLeaderboardAndHistory() {
   const myName = appState.user ? appState.user.username.toLowerCase() : "";
 
   // 1. ТОП ИГРОКОВ (Уникальные игроки)
-  let players = (appState.leaderboard && appState.leaderboard.best_players) || [];
+  let players = [...((appState.leaderboard && appState.leaderboard.best_players) || [])];
   if (players.length === 0 && appState.leaderboard && appState.leaderboard.top_runs) {
     players = computeBestPlayers(appState.leaderboard.top_runs);
   }
+
+  // Всегда объединяем со списком соперников-охотников, чтобы игрок никогда не был один!
+  const knownPlayers = new Set(players.map((p) => p.username.toLowerCase()));
+  for (const rival of SEED_RIVALS) {
+    if (!knownPlayers.has(rival.username.toLowerCase())) {
+      players.push({
+        username: rival.username,
+        best_score: rival.score,
+        best_time: rival.survival_time,
+        best_kills: rival.kills,
+        max_level: rival.level_reached,
+        runs_count: 1,
+      });
+      knownPlayers.add(rival.username.toLowerCase());
+    }
+  }
+  players.sort((a, b) => b.best_score - a.best_score || b.best_time - a.best_time);
 
   if (playersBox) {
     if (players.length === 0) {
@@ -798,7 +815,16 @@ function renderLeaderboardAndHistory() {
   }
 
   // 2. ЛУЧШИЕ ЗАБЕГИ (Рекордные одиночные попытки)
-  const topRuns = (appState.leaderboard && appState.leaderboard.top_runs) || [];
+  let topRuns = [...((appState.leaderboard && appState.leaderboard.top_runs) || [])];
+  const knownRuns = new Set(topRuns.map((r) => `${r.username.toLowerCase()}_${r.score}`));
+  for (const rival of SEED_RIVALS) {
+    const key = `${rival.username.toLowerCase()}_${rival.score}`;
+    if (!knownRuns.has(key)) {
+      topRuns.push({ ...rival });
+      knownRuns.add(key);
+    }
+  }
+  topRuns.sort((a, b) => b.score - a.score || b.survival_time - a.survival_time);
   if (runsBox) {
     if (topRuns.length === 0) {
       runsBox.innerHTML = `<p style="color:#94a3b8;font-size:0.88rem;padding:12px 0;">Пока нет записанных забегов.</p>`;
@@ -2126,7 +2152,6 @@ function damagePlayer(amount) {
 const deathSlotModal = document.getElementById("deathSlotModal");
 const slotStatusMsg = document.getElementById("slotStatusMsg");
 const btnSpinSlot = document.getElementById("btnSpinSlot");
-const btnCheatHearts = document.getElementById("btnCheatHearts");
 const btnSkipSlot = document.getElementById("btnSkipSlot");
 const slotResultBanner = document.getElementById("slotResultBanner");
 const btnConfirmResurrect = document.getElementById("btnConfirmResurrect");
@@ -2134,7 +2159,6 @@ const btnConfirmResurrect = document.getElementById("btnConfirmResurrect");
 const deathSlot = {
   active: false,
   spinning: false,
-  cheatAlwaysWin: false,
   symbols: ["❤️", "💀", "⚡", "🪙", "💎", "7️⃣"],
   results: ["❤️", "❤️", "❤️"],
   spinInterval: null,
@@ -2188,8 +2212,8 @@ function spinDeathSlot() {
     sfx.slotTick();
   }, 85);
 
-  // Определение исхода (при чите 100% или шансе ~38% выпадает 3 сердца)
-  const willWin = deathSlot.cheatAlwaysWin || Math.random() < 0.38;
+  // Честный азарт рулетки: честный шанс ~28% выбить 3 сердца
+  const willWin = Math.random() < 0.28;
 
   if (willWin) {
     deathSlot.results = ["❤️", "❤️", "❤️"];
@@ -3267,13 +3291,7 @@ function initEvents() {
 
   // Слот-машина при смерти
   if (btnSpinSlot) btnSpinSlot.addEventListener("click", spinDeathSlot);
-  if (btnCheatHearts) {
-    btnCheatHearts.addEventListener("click", () => {
-      deathSlot.cheatAlwaysWin = !deathSlot.cheatAlwaysWin;
-      btnCheatHearts.classList.toggle("active", deathSlot.cheatAlwaysWin);
-      btnCheatHearts.textContent = deathSlot.cheatAlwaysWin ? "🍀 Удача 100% (ВКЛ)" : "🍀 Удача 100% (Тест)";
-    });
-  }
+
   if (btnSkipSlot) btnSkipSlot.addEventListener("click", dismissDeathSlot);
   if (btnConfirmResurrect) btnConfirmResurrect.addEventListener("click", resurrectPlayer);
 

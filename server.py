@@ -326,6 +326,16 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write(f"[API] {self.address_string()} - {fmt % args}\n")
 
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
+
     def send_json(self, data: dict, status: int = HTTPStatus.OK):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
