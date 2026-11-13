@@ -206,6 +206,47 @@ const appState = {
   leaderboard: { top_runs: [], best_players: [] },
 };
 
+
+const SEED_RIVALS = [
+  { username: "goida", weapon: "wand", score: 7567, survival_time: 213, kills: 524, level_reached: 15, gold_earned: 256 },
+  { username: "CyberSamurai", weapon: "slash", score: 6240, survival_time: 198, kills: 435, level_reached: 12, gold_earned: 120 },
+  { username: "NeonViper", weapon: "blades", score: 5120, survival_time: 184, kills: 390, level_reached: 11, gold_earned: 95 },
+  { username: "VoidWalker", weapon: "lightning", score: 4300, survival_time: 172, kills: 280, level_reached: 9, gold_earned: 70 },
+  { username: "Stalker77", weapon: "wand", score: 3540, survival_time: 165, kills: 240, level_reached: 8, gold_earned: 60 },
+  { username: "Gapchuk", weapon: "wand", score: 2975, survival_time: 160, kills: 176, level_reached: 8, gold_earned: 45 },
+  { username: "pepe", weapon: "blades", score: 2667, survival_time: 93, kills: 167, level_reached: 9, gold_earned: 41 },
+  { username: "MatrixRunner", weapon: "wand", score: 2180, survival_time: 115, kills: 145, level_reached: 7, gold_earned: 38 },
+  { username: "ZeroCool", weapon: "lightning", score: 1820, survival_time: 92, kills: 120, level_reached: 6, gold_earned: 28 },
+  { username: "Shadow_Ninja", weapon: "slash", score: 1490, survival_time: 74, kills: 95, level_reached: 5, gold_earned: 22 },
+  { username: "nill_kiggers", weapon: "lightning", score: 1325, survival_time: 45, kills: 82, level_reached: 5, gold_earned: 15 },
+  { username: "пупа", weapon: "wand", score: 820, survival_time: 42, kills: 48, level_reached: 4, gold_earned: 12 },
+];
+
+function computeBestPlayers(runs) {
+  const map = new Map();
+  for (const r of runs) {
+    const uname = r.username;
+    if (!map.has(uname)) {
+      map.set(uname, {
+        username: uname,
+        best_score: r.score,
+        best_time: r.survival_time,
+        best_kills: r.kills,
+        max_level: r.level_reached,
+        runs_count: 1,
+      });
+    } else {
+      const p = map.get(uname);
+      p.runs_count++;
+      if (r.score > p.best_score) p.best_score = r.score;
+      if (r.survival_time > p.best_time) p.best_time = r.survival_time;
+      if (r.kills > p.best_kills) p.best_kills = r.kills;
+      if (r.level_reached > p.max_level) p.max_level = r.level_reached;
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => b.best_score - a.best_score || b.best_time - a.best_time);
+}
+
 const LOCAL_UPGRADE_CONFIG = {
   max_hp: { max_level: 10, base_cost: 30, cost_mult: 1.5, name: "Живучесть (+20 HP)" },
   damage: { max_level: 10, base_cost: 40, cost_mult: 1.6, name: "Мощь (+10% урона)" },
@@ -255,6 +296,20 @@ async function getBrowserSqlite() {
           created_at TEXT NOT NULL DEFAULT ''
         );
       `);
+      const existingRunsCount = queryRows(sqlJsDb, "SELECT COUNT(*) as c FROM runs")[0]?.c || 0;
+      if (existingRunsCount === 0) {
+        SEED_RIVALS.forEach((r, idx) => {
+          sqlJsDb.run(
+            `INSERT INTO users (id, username, password_hash, gold, upgrades_json) VALUES (?, ?, ?, ?, ?)`,
+            [idx + 10, r.username, btoa("1234"), r.gold_earned * 2, "{}"]
+          );
+          sqlJsDb.run(
+            `INSERT INTO runs (user_id, username, weapon, score, survival_time, kills, level_reached, gold_earned, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [idx + 10, r.username, r.weapon, r.score, r.survival_time, r.kills, r.level_reached, r.gold_earned, new Date().toISOString()]
+          );
+        });
+      }
       saveBrowserSqlite();
       return sqlJsDb;
     } catch (e) {
@@ -355,12 +410,17 @@ function handlePureLocalDbApi(path, method, body) {
     if (!u) throw new Error("Не авторизован");
     return { user: buildProfile(u) };
   }
+  if (!store.runs || store.runs.length === 0) {
+    store.runs = SEED_RIVALS.map((r, idx) => ({ id: idx + 1, user_id: idx + 10, ...r }));
+    save();
+  }
   if (path === "/api/leaderboard") {
     const topRuns = store.runs
       .slice()
       .sort((a, b) => b.score - a.score || b.survival_time - a.survival_time)
-      .slice(0, 15);
-    return { top_runs: topRuns, best_players: [] };
+      .slice(0, 25);
+    const bestPlayers = computeBestPlayers(store.runs).slice(0, 25);
+    return { top_runs: topRuns, best_players: bestPlayers };
   }
   if (path === "/api/register") {
     const username = String((body && body.username) || "").trim();
@@ -458,9 +518,14 @@ async function handleBrowserSqliteApi(path, method, body) {
     const topRuns = queryRows(
       db,
       `SELECT id, username, weapon, score, survival_time, kills, level_reached, gold_earned
-       FROM runs ORDER BY score DESC, survival_time DESC LIMIT 15`
+       FROM runs ORDER BY score DESC, survival_time DESC LIMIT 25`
     );
-    return { top_runs: topRuns, best_players: [] };
+    const bestPlayers = queryRows(
+      db,
+      `SELECT username, MAX(score) as best_score, MAX(survival_time) as best_time, MAX(kills) as best_kills, MAX(level_reached) as max_level, COUNT(*) as runs_count
+       FROM runs GROUP BY username ORDER BY best_score DESC, best_time DESC LIMIT 25`
+    );
+    return { top_runs: topRuns, best_players: bestPlayers };
   }
 
   if (path === "/api/register" && method === "POST") {
@@ -682,76 +747,135 @@ function renderShop() {
 }
 
 function renderLeaderboardAndHistory() {
-  const lbBox = document.getElementById("leaderboardContainer");
+  const playersBox = document.getElementById("playersContainer");
+  const runsBox = document.getElementById("runsContainer");
   const histBox = document.getElementById("historyContainer");
   const myName = appState.user ? appState.user.username.toLowerCase() : "";
 
-  const runs = appState.leaderboard.top_runs || [];
-  if (runs.length === 0) {
-    lbBox.innerHTML = `<p style="color:#94a3b8;font-size:0.88rem;padding:12px 0;">Пока нет записанных забегов. Стань первым в таблице лидеров!</p>`;
-  } else {
-    lbBox.innerHTML = `
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Игрок</th>
-            <th>Очки</th>
-            <th>Время</th>
-            <th>💀</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${runs
-            .map(
-              (r, idx) => `
-            <tr class="${r.username.toLowerCase() === myName ? "me-row" : ""}">
-              <td>${idx + 1}</td>
-              <td><b>${escapeHtml(r.username)}</b></td>
-              <td style="color:#00f2fe;font-weight:700">${r.score}</td>
-              <td>${formatTime(r.survival_time)}</td>
-              <td>${r.kills}</td>
-            </tr>
-          `
-            )
-            .join("")}
-        </tbody>
-      </table>
-    `;
+  // 1. ТОП ИГРОКОВ (Уникальные игроки)
+  let players = (appState.leaderboard && appState.leaderboard.best_players) || [];
+  if (players.length === 0 && appState.leaderboard && appState.leaderboard.top_runs) {
+    players = computeBestPlayers(appState.leaderboard.top_runs);
   }
 
-  const myRuns = (appState.user && appState.user.recent_runs) || [];
-  if (myRuns.length === 0) {
-    histBox.innerHTML = `<p style="color:#94a3b8;font-size:0.88rem;padding:12px 0;">У вас пока нет завершённых забегов.</p>`;
-  } else {
-    histBox.innerHTML = `
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Очки</th>
-            <th>Время</th>
-            <th>Ур.</th>
-            <th>💀</th>
-            <th>🪙</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${myRuns
-            .map(
-              (r) => `
+  if (playersBox) {
+    if (players.length === 0) {
+      playersBox.innerHTML = `<p style="color:#94a3b8;font-size:0.88rem;padding:12px 0;">Пока нет игроков в таблице лидеров.</p>`;
+    } else {
+      playersBox.innerHTML = `
+        <table class="data-table">
+          <thead>
             <tr>
-              <td style="color:#00f2fe;font-weight:700">${r.score}</td>
-              <td>${formatTime(r.survival_time)}</td>
-              <td>${r.level_reached}</td>
-              <td>${r.kills}</td>
-              <td style="color:#ffd166">+${r.gold_earned}</td>
+              <th>#</th>
+              <th>Игрок</th>
+              <th>Рекорд</th>
+              <th>Время</th>
+              <th>💀</th>
+              <th>Игр</th>
             </tr>
-          `
-            )
-            .join("")}
-        </tbody>
-      </table>
-    `;
+          </thead>
+          <tbody>
+            ${players
+              .map((p, idx) => {
+                const isMe = p.username.toLowerCase() === myName;
+                const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `${idx + 1}`;
+                return `
+                  <tr class="${isMe ? "me-row" : ""}">
+                    <td style="font-weight:700">${medal}</td>
+                    <td><b>${escapeHtml(p.username)}</b> ${isMe ? "<small style='color:var(--neon-cyan)'>(Вы)</small>" : ""}</td>
+                    <td style="color:#00f2fe;font-weight:700">${p.best_score}</td>
+                    <td>${formatTime(p.best_time)}</td>
+                    <td>${p.best_kills}</td>
+                    <td style="color:#ffd166">${p.runs_count}</td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      `;
+    }
+  }
+
+  // 2. ЛУЧШИЕ ЗАБЕГИ (Рекордные одиночные попытки)
+  const topRuns = (appState.leaderboard && appState.leaderboard.top_runs) || [];
+  if (runsBox) {
+    if (topRuns.length === 0) {
+      runsBox.innerHTML = `<p style="color:#94a3b8;font-size:0.88rem;padding:12px 0;">Пока нет записанных забегов.</p>`;
+    } else {
+      runsBox.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Игрок</th>
+              <th>Оружие</th>
+              <th>Очки</th>
+              <th>Время</th>
+              <th>💀</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${topRuns
+              .map((r, idx) => {
+                const isMe = r.username.toLowerCase() === myName;
+                const wIcon = WEAPON_CATALOG[r.weapon] ? WEAPON_CATALOG[r.weapon].icon : "⚔️";
+                return `
+                  <tr class="${isMe ? "me-row" : ""}">
+                    <td>${idx + 1}</td>
+                    <td><b>${escapeHtml(r.username)}</b></td>
+                    <td><span title="${r.weapon}">${wIcon}</span></td>
+                    <td style="color:#00f2fe;font-weight:700">${r.score}</td>
+                    <td>${formatTime(r.survival_time)}</td>
+                    <td>${r.kills}</td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      `;
+    }
+  }
+
+  // 3. МОИ ЗАБЕГИ
+  const myRuns = (appState.user && appState.user.recent_runs) || [];
+  if (histBox) {
+    if (myRuns.length === 0) {
+      histBox.innerHTML = `<p style="color:#94a3b8;font-size:0.88rem;padding:12px 0;">У вас пока нет завершённых забегов. Начните первый забег!</p>`;
+    } else {
+      histBox.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Очки</th>
+              <th>Оружие</th>
+              <th>Время</th>
+              <th>Ур.</th>
+              <th>💀</th>
+              <th>🪙</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${myRuns
+              .map((r) => {
+                const wIcon = WEAPON_CATALOG[r.weapon] ? WEAPON_CATALOG[r.weapon].icon : "⚔️";
+                return `
+                  <tr>
+                    <td style="color:#00f2fe;font-weight:700">${r.score}</td>
+                    <td><span title="${r.weapon}">${wIcon}</span></td>
+                    <td>${formatTime(r.survival_time)}</td>
+                    <td>${r.level_reached}</td>
+                    <td>${r.kills}</td>
+                    <td style="color:#ffd166">+${r.gold_earned}</td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      `;
+    }
   }
 }
 
@@ -3176,25 +3300,24 @@ function initEvents() {
     });
   }
 
-  // Переключение вкладок Лидерборд / История
-  const subLb = document.getElementById("subtabLeaderboard");
+  // Переключение вкладок: Топ игроков / Лучшие забеги / Мои игры
+  const subPlayers = document.getElementById("subtabPlayers");
+  const subRuns = document.getElementById("subtabRuns");
   const subHist = document.getElementById("subtabHistory");
-  const lbContainer = document.getElementById("leaderboardContainer");
+  const playersContainer = document.getElementById("playersContainer");
+  const runsContainer = document.getElementById("runsContainer");
   const histContainer = document.getElementById("historyContainer");
 
-  subLb.addEventListener("click", () => {
-    subLb.classList.add("active");
-    subHist.classList.remove("active");
-    lbContainer.classList.remove("hidden");
-    histContainer.classList.add("hidden");
-  });
+  function switchLeaderboardTab(activeBtn, showContainer) {
+    [subPlayers, subRuns, subHist].forEach((b) => b && b.classList.remove("active"));
+    [playersContainer, runsContainer, histContainer].forEach((c) => c && c.classList.add("hidden"));
+    if (activeBtn) activeBtn.classList.add("active");
+    if (showContainer) showContainer.classList.remove("hidden");
+  }
 
-  subHist.addEventListener("click", () => {
-    subHist.classList.add("active");
-    subLb.classList.remove("active");
-    histContainer.classList.remove("hidden");
-    lbContainer.classList.add("hidden");
-  });
+  if (subPlayers) subPlayers.addEventListener("click", () => switchLeaderboardTab(subPlayers, playersContainer));
+  if (subRuns) subRuns.addEventListener("click", () => switchLeaderboardTab(subRuns, runsContainer));
+  if (subHist) subHist.addEventListener("click", () => switchLeaderboardTab(subHist, histContainer));
 }
 
 async function bootstrap() {

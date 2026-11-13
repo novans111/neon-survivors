@@ -388,7 +388,7 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
                         r.created_at
                     FROM runs r
                     ORDER BY r.score DESC, r.survival_time DESC
-                    LIMIT 15
+                    LIMIT 25
                     """
                 ).fetchall()
 
@@ -402,9 +402,9 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
                         MAX(level_reached) AS max_level,
                         COUNT(*) AS runs_count
                     FROM runs
-                    GROUP BY user_id
+                    GROUP BY username
                     ORDER BY best_score DESC, best_time DESC
-                    LIMIT 15
+                    LIMIT 25
                     """
                 ).fetchall()
 

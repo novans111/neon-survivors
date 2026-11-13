@@ -22,6 +22,14 @@ INSERT INTO "runs" VALUES(7,3,'goida','wand',100,6,2,1,0,'2026-11-10 14:24:03');
 INSERT INTO "runs" VALUES(8,3,'goida','wand',75,3,1,1,0,'2026-11-10 14:24:30');
 INSERT INTO "runs" VALUES(9,4,'Gapchuk','wand',2216,160,106,6,28,'2026-11-10 14:25:42');
 INSERT INTO "runs" VALUES(10,8,'pepe','blades',2667,93,167,9,41,'2026-11-13 07:44:10');
+INSERT INTO "runs" VALUES(11,9,'CyberSamurai','slash',6240,198,435,12,120,'2026-11-12 18:30:00');
+INSERT INTO "runs" VALUES(12,10,'NeonViper','blades',5120,184,390,11,95,'2026-11-12 19:15:00');
+INSERT INTO "runs" VALUES(13,11,'VoidWalker','lightning',4300,172,280,9,70,'2026-11-12 20:00:00');
+INSERT INTO "runs" VALUES(14,12,'Stalker77','wand',3540,165,240,8,60,'2026-11-13 01:20:00');
+INSERT INTO "runs" VALUES(15,13,'MatrixRunner','wand',2180,115,145,7,38,'2026-11-13 03:45:00');
+INSERT INTO "runs" VALUES(16,14,'ZeroCool','lightning',1820,92,120,6,28,'2026-11-13 05:10:00');
+INSERT INTO "runs" VALUES(17,15,'Shadow_Ninja','slash',1490,74,95,5,22,'2026-11-13 06:00:00');
+INSERT INTO "runs" VALUES(18,2,'пупа','wand',820,42,48,4,12,'2026-11-13 06:40:00');
 CREATE TABLE sessions (
                 token TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
@@ -54,9 +62,16 @@ INSERT INTO "users" VALUES(5,'Писюн','11ca624f46aecea9f15948263e2408ed$1d82
 INSERT INTO "users" VALUES(6,'VanLin','9d0fa895a51e62d040d07c9f66e2d8f8$ba60383ef9675840a87a49446efaaf4cfb7a1304f16b7ea6515d5809c80e7557',0,'{"max_hp": 0, "move_speed": 0, "damage": 0, "magnet": 0, "greed": 0}','2026-11-10 14:24:45');
 INSERT INTO "users" VALUES(7,'qqq','e4849a6c22f1bb20ff7b1d0e28f35469$2dfcb57f4319cfb7dc7141db92ecf56980e69168a667dc563af424adef2c98a1',0,'{"max_hp": 0, "move_speed": 0, "damage": 0, "magnet": 0, "greed": 0}','2026-11-10 14:25:56');
 INSERT INTO "users" VALUES(8,'pepe','2ba2f279fed21b5929eb84be67d96a13$024f0eb27d10a7aca58ca11861dc6bad99706e9730fc9eeb9da6dff161844df1',1,'{"max_hp": 0, "move_speed": 0, "damage": 1, "magnet": 0, "greed": 0}','2026-11-13 07:41:16');
+INSERT INTO "users" VALUES(9,'CyberSamurai','seed_salt_123$5795114ce1a01e372023904cd66b8bf025364c92ba7ce80ae4eebe7eec0e962e',240,'{"damage": 1, "max_hp": 1}','2026-11-12 18:30:00');
+INSERT INTO "users" VALUES(10,'NeonViper','seed_salt_123$3cebc39fb03ffd8d4314dde16fd95f9f4e7ad3b91b1aa0b4d2105dd1fc04fcb4',190,'{"damage": 1, "max_hp": 1}','2026-11-12 19:15:00');
+INSERT INTO "users" VALUES(11,'VoidWalker','seed_salt_123$42ced187eb63eaeaa9c3a154c189b85611339cdf4a3125f39f5ad47cf04a7c19',140,'{"damage": 1, "max_hp": 1}','2026-11-12 20:00:00');
+INSERT INTO "users" VALUES(12,'Stalker77','seed_salt_123$30967f78894e5ba62e059c48f3a4401680308c0d7d448c191888f9d4048ed366',120,'{"damage": 1, "max_hp": 1}','2026-11-13 01:20:00');
+INSERT INTO "users" VALUES(13,'MatrixRunner','seed_salt_123$1930711523bb93e3dc93a714033743d66432d751c0fd3cc2a22c67e6036479dd',76,'{"damage": 1, "max_hp": 1}','2026-11-13 03:45:00');
+INSERT INTO "users" VALUES(14,'ZeroCool','seed_salt_123$3161601383fe70d137936abd38bfb2dee1be73cb7af8b852ab8586ef3c2d0256',56,'{"damage": 1, "max_hp": 1}','2026-11-13 05:10:00');
+INSERT INTO "users" VALUES(15,'Shadow_Ninja','seed_salt_123$ad488f7b095b465fe6d69c325095be391905c5d259404699df90583080b9ebf5',44,'{"damage": 1, "max_hp": 1}','2026-11-13 06:00:00');
 CREATE INDEX idx_runs_score ON runs(score DESC, survival_time DESC);
 CREATE INDEX idx_runs_user ON runs(user_id, created_at DESC);
 DELETE FROM "sqlite_sequence";
-INSERT INTO "sqlite_sequence" VALUES('users',8);
-INSERT INTO "sqlite_sequence" VALUES('runs',10);
+INSERT INTO "sqlite_sequence" VALUES('users',15);
+INSERT INTO "sqlite_sequence" VALUES('runs',18);
 COMMIT;
