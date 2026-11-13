@@ -85,6 +85,7 @@
         </div>
         <div class="hub-header-actions">
           <div class="gold-display">🪙 <span id="menuGold">0</span> золота</div>
+          <button id="btnSyncRepo" class="secondary-btn sync-btn" title="Синхронизировать базу данных с репозиторием GitHub">☁️ Git Sync</button>
           <button id="btnMuteMenu" class="secondary-btn">🔊 Звук</button>
           <button id="btnLogout" class="secondary-btn danger-outline">Выйти</button>
         </div>
@@ -144,6 +145,82 @@
       <div class="modal-actions">
         <button id="btnResumeGame" class="primary-btn">Продолжить (ESC)</button>
         <button id="btnEndRunEarly" class="secondary-btn danger-outline">Завершить забег и сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА СЛОТ-МАШИНЫ ПРИ СМЕРТИ (ШАНС НА ВОСКРЕШЕНИЕ) -->
+  <div id="deathSlotModal" class="overlay-screen modal-backdrop hidden">
+    <div class="slot-cabinet glass-panel">
+      <div class="slot-header">
+        <div class="slot-lights-row">
+          <span class="slot-bulb"></span>
+          <span class="slot-bulb"></span>
+          <span class="slot-bulb"></span>
+          <span class="slot-bulb"></span>
+          <span class="slot-bulb"></span>
+          <span class="slot-bulb"></span>
+          <span class="slot-bulb"></span>
+        </div>
+        <h2 class="slot-neon-title">🎰 СЛОТ-МАШИНА СУДЬБЫ 🎰</h2>
+        <p class="slot-subtitle">Вы пали, но пустота даёт шанс! Выбей <strong class="heart-text">3 СЕРДЦА (❤️❤️❤️)</strong> для воскрешения!</p>
+      </div>
+
+      <div class="slot-reels-frame">
+        <div class="slot-reel-column" id="reelCol0">
+          <div class="slot-reel-glass-top"></div>
+          <div class="slot-reel-viewport">
+            <div class="slot-reel-strip" id="slotStrip0">
+              <div class="slot-item">❤️</div>
+            </div>
+          </div>
+          <div class="slot-reel-glass-bottom"></div>
+        </div>
+
+        <div class="slot-reel-divider"></div>
+
+        <div class="slot-reel-column" id="reelCol1">
+          <div class="slot-reel-glass-top"></div>
+          <div class="slot-reel-viewport">
+            <div class="slot-reel-strip" id="slotStrip1">
+              <div class="slot-item">❤️</div>
+            </div>
+          </div>
+          <div class="slot-reel-glass-bottom"></div>
+        </div>
+
+        <div class="slot-reel-divider"></div>
+
+        <div class="slot-reel-column" id="reelCol2">
+          <div class="slot-reel-glass-top"></div>
+          <div class="slot-reel-viewport">
+            <div class="slot-reel-strip" id="slotStrip2">
+              <div class="slot-item">❤️</div>
+            </div>
+          </div>
+          <div class="slot-reel-glass-bottom"></div>
+        </div>
+      </div>
+
+      <div id="slotStatusMsg" class="slot-status-box">
+        Испытай удачу: жми «КРУТИТЬ» или [ПРОБЕЛ]!
+      </div>
+
+      <div class="slot-controls">
+        <button id="btnSpinSlot" class="primary-btn slot-main-btn">🎲 КРУТИТЬ РУЛЕТКУ! [ПРОБЕЛ]</button>
+        <div class="slot-secondary-row">
+          <button id="btnCheatHearts" class="slot-cheat-btn" title="Активировать 100% шанс выпадения 3 сердец">🍀 Удача 100% (Тест)</button>
+          <button id="btnSkipSlot" class="secondary-btn danger-outline">💀 Принять поражение</button>
+        </div>
+      </div>
+
+      <div id="slotResultBanner" class="slot-result-overlay hidden">
+        <div class="slot-result-content">
+          <div id="slotResultEmoji" class="slot-result-emoji">❤️‍🔥</div>
+          <h3 id="slotResultHeading">ВОСКРЕШЕНИЕ!</h3>
+          <p id="slotResultDetail">Сердца воссоединились! Вы возвращаетесь в бой с полным здоровьем!</p>
+          <button id="btnConfirmResurrect" class="primary-btn big-btn">⚡ В БОЙ!</button>
+        </div>
       </div>
     </div>
   </div>

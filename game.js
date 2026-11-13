@@ -167,6 +167,30 @@ class SoundFX {
       setTimeout(() => this.tone(f, "triangle", 0.18, 0.08), idx * 75);
     });
   }
+  slotTick() {
+    this.tone(1100 + Math.random() * 200, "square", 0.035, 0.035);
+  }
+  slotStop() {
+    this.tone(320, "sawtooth", 0.12, 0.08, 130);
+  }
+  slotWin() {
+    if (this.muted) return;
+    [523, 659, 784, 1046, 1318, 1568].forEach((f, idx) => {
+      setTimeout(() => this.tone(f, "triangle", 0.18, 0.08), idx * 70);
+    });
+  }
+  slotLose() {
+    if (this.muted) return;
+    [380, 310, 240, 160].forEach((f, idx) => {
+      setTimeout(() => this.tone(f, "sawtooth", 0.2, 0.07), idx * 100);
+    });
+  }
+  resurrect() {
+    if (this.muted) return;
+    [330, 440, 554, 659, 880, 1108, 1318, 1760].forEach((f, idx) => {
+      setTimeout(() => this.tone(f, "sine", 0.22, 0.08), idx * 60);
+    });
+  }
 }
 
 const sfx = new SoundFX();
@@ -787,8 +811,16 @@ const input = {
 
 window.addEventListener("keydown", (e) => {
   input.keys[e.code] = true;
-  if ((e.code === "Escape" || e.code === "KeyP") && game.running && !game.over && !game.choosingUpgrade) {
+  if ((e.code === "Escape" || e.code === "KeyP") && game.running && !game.over && !game.choosingUpgrade && !game.deathSlotActive) {
     togglePause();
+  }
+  if (e.code === "Space" && deathSlot.active) {
+    e.preventDefault();
+    if (!slotResultBanner.classList.contains("hidden")) {
+      resurrectPlayer();
+    } else if (!deathSlot.spinning) {
+      spinDeathSlot();
+    }
   }
 });
 
@@ -845,6 +877,8 @@ const game = {
   running: false,
   paused: false,
   choosingUpgrade: false,
+  deathSlotActive: false,
+  resurrections: 0,
   over: false,
   time: 0,
   kills: 0,
@@ -959,6 +993,11 @@ function startNewRun() {
   levelUpModal.classList.add("hidden");
   pauseModal.classList.add("hidden");
   gameOverModal.classList.add("hidden");
+  if (deathSlotModal) deathSlotModal.classList.add("hidden");
+  deathSlot.active = false;
+  deathSlot.spinning = false;
+  game.deathSlotActive = false;
+  game.resurrections = 0;
   showScreen("game");
   updateHud();
 }
@@ -1702,7 +1741,7 @@ function applyUpgradeChoice(ch) {
 // ОБНОВЛЕНИЕ ФИЗИКИ И СОСТОЯНИЯ ИГРЫ
 // ============================================================================
 function updateGame(dt) {
-  if (!game.running || game.paused || game.choosingUpgrade || game.over) return;
+  if (!game.running || game.paused || game.choosingUpgrade || game.over || game.deathSlotActive) return;
 
   game.time += dt;
   const p = game.player;
@@ -1943,7 +1982,7 @@ function updateGame(dt) {
 
 function damagePlayer(amount) {
   const p = game.player;
-  if (p.invulnTimer > 0 || game.over) return;
+  if (p.invulnTimer > 0 || game.over || game.deathSlotActive) return;
   p.hp -= amount;
   p.invulnTimer = 0.42;
   game.shakeTime = 0.2;
@@ -1953,14 +1992,223 @@ function damagePlayer(amount) {
 
   if (p.hp <= 0) {
     p.hp = 0;
-    finishRun("ВЫ ПАЛИ В БОЮ");
+    triggerDeathSlot();
   }
+}
+
+// ============================================================================
+// СЛОТ-МАШИНА СУДЬБЫ ПРИ СМЕРТИ (ШАНС НА ВОСКРЕШЕНИЕ)
+// ============================================================================
+const deathSlotModal = document.getElementById("deathSlotModal");
+const slotStatusMsg = document.getElementById("slotStatusMsg");
+const btnSpinSlot = document.getElementById("btnSpinSlot");
+const btnCheatHearts = document.getElementById("btnCheatHearts");
+const btnSkipSlot = document.getElementById("btnSkipSlot");
+const slotResultBanner = document.getElementById("slotResultBanner");
+const btnConfirmResurrect = document.getElementById("btnConfirmResurrect");
+
+const deathSlot = {
+  active: false,
+  spinning: false,
+  cheatAlwaysWin: false,
+  symbols: ["❤️", "💀", "⚡", "🪙", "💎", "7️⃣"],
+  results: ["❤️", "❤️", "❤️"],
+  spinInterval: null,
+};
+
+function triggerDeathSlot() {
+  if (game.over || deathSlot.active) return;
+  deathSlot.active = true;
+  game.deathSlotActive = true;
+  game.shakeTime = 0.4;
+  game.shakeMag = 8;
+
+  // Сброс состояния элементов слот-машины
+  slotResultBanner.classList.add("hidden");
+  btnSpinSlot.disabled = false;
+  btnSpinSlot.textContent = "🎲 КРУТИТЬ РУЛЕТКУ! [ПРОБЕЛ]";
+  slotStatusMsg.textContent = "Испытай удачу: жми «КРУТИТЬ» или [ПРОБЕЛ]!";
+  slotStatusMsg.style.color = "var(--text-main)";
+
+  for (let i = 0; i < 3; i++) {
+    const col = document.getElementById(`reelCol${i}`);
+    if (col) col.classList.remove("win-highlight");
+    const strip = document.getElementById(`slotStrip${i}`);
+    if (strip) {
+      strip.classList.remove("spinning");
+      const randomSym = deathSlot.symbols[Math.floor(Math.random() * deathSlot.symbols.length)];
+      strip.innerHTML = `<div class="slot-item">${randomSym}</div>`;
+    }
+  }
+
+  deathSlotModal.classList.remove("hidden");
+  sfx.hurt();
+}
+
+function spinDeathSlot() {
+  if (!deathSlot.active || deathSlot.spinning) return;
+  deathSlot.spinning = true;
+  btnSpinSlot.disabled = true;
+  slotStatusMsg.textContent = "Барабаны судьбы вращаются...";
+  slotStatusMsg.style.color = "var(--neon-gold)";
+
+  for (let i = 0; i < 3; i++) {
+    const strip = document.getElementById(`slotStrip${i}`);
+    if (strip) strip.classList.add("spinning");
+    const col = document.getElementById(`reelCol${i}`);
+    if (col) col.classList.remove("win-highlight");
+  }
+
+  if (deathSlot.spinInterval) clearInterval(deathSlot.spinInterval);
+  deathSlot.spinInterval = setInterval(() => {
+    sfx.slotTick();
+  }, 85);
+
+  // Определение исхода (при чите 100% или шансе ~38% выпадает 3 сердца)
+  const willWin = deathSlot.cheatAlwaysWin || Math.random() < 0.38;
+
+  if (willWin) {
+    deathSlot.results = ["❤️", "❤️", "❤️"];
+  } else {
+    const nonHeartSymbols = deathSlot.symbols.filter((s) => s !== "❤️");
+    const r1 = Math.random() < 0.55 ? "❤️" : deathSlot.symbols[Math.floor(Math.random() * deathSlot.symbols.length)];
+    const r2 = Math.random() < 0.65 ? "❤️" : deathSlot.symbols[Math.floor(Math.random() * deathSlot.symbols.length)];
+    const r3 = nonHeartSymbols[Math.floor(Math.random() * nonHeartSymbols.length)];
+    deathSlot.results = [r1, r2, r3];
+    if (Math.random() < 0.4) {
+      const tmp = deathSlot.results[2];
+      deathSlot.results[2] = deathSlot.results[1];
+      deathSlot.results[1] = tmp;
+    }
+    if (deathSlot.results.every((s) => s === "❤️")) {
+      deathSlot.results[2] = "💀";
+    }
+  }
+
+  // Остановка барабанов по очереди
+  setTimeout(() => {
+    stopReel(0, deathSlot.results[0]);
+  }, 800);
+
+  setTimeout(() => {
+    stopReel(1, deathSlot.results[1]);
+  }, 1500);
+
+  setTimeout(() => {
+    stopReel(2, deathSlot.results[2]);
+    if (deathSlot.spinInterval) {
+      clearInterval(deathSlot.spinInterval);
+      deathSlot.spinInterval = null;
+    }
+    evaluateDeathSlotResult();
+  }, 2200);
+}
+
+function stopReel(index, symbol) {
+  const strip = document.getElementById(`slotStrip${index}`);
+  if (strip) {
+    strip.classList.remove("spinning");
+    strip.innerHTML = `<div class="slot-item">${symbol}</div>`;
+  }
+  sfx.slotStop();
+}
+
+function evaluateDeathSlotResult() {
+  deathSlot.spinning = false;
+  const isWin = deathSlot.results.every((s) => s === "❤️");
+
+  if (isWin) {
+    for (let i = 0; i < 3; i++) {
+      const col = document.getElementById(`reelCol${i}`);
+      if (col) col.classList.add("win-highlight");
+    }
+    sfx.slotWin();
+    slotStatusMsg.textContent = "🎉 ТРИ СЕРДЦА! ВЫ ОБМАНУЛИ СМЕРТЬ! 🎉";
+    slotStatusMsg.style.color = "#06d6a0";
+
+    const heading = document.getElementById("slotResultHeading");
+    const detail = document.getElementById("slotResultDetail");
+    const emoji = document.getElementById("slotResultEmoji");
+    heading.textContent = "ДЖЕКПОТ! ВОСКРЕШЕНИЕ!";
+    heading.style.color = "#06d6a0";
+    detail.textContent = "Три сердца соединились! Здоровье полностью восстановлено, активирован щит неуязвимости!";
+    emoji.textContent = "❤️‍🔥";
+    btnConfirmResurrect.textContent = "⚡ В БОЙ!";
+    slotResultBanner.classList.remove("hidden");
+
+    const p = game.player;
+    if (p) {
+      for (let i = 0; i < 40; i++) {
+        spawnParticles(p.x, p.y, i % 2 === 0 ? "#ff2a85" : "#ffd166", 1);
+      }
+    }
+  } else {
+    sfx.slotLose();
+    slotStatusMsg.textContent = "☠ СУДЬБА ВЫНЕСЛА ПРИГОВОР... ВЫ ПАЛИ ☠";
+    slotStatusMsg.style.color = "var(--danger)";
+
+    setTimeout(() => {
+      dismissDeathSlot();
+    }, 1800);
+  }
+}
+
+function resurrectPlayer() {
+  if (!deathSlot.active) return;
+  deathSlot.active = false;
+  deathSlot.spinning = false;
+  game.deathSlotActive = false;
+  deathSlotModal.classList.add("hidden");
+  slotResultBanner.classList.add("hidden");
+
+  const p = game.player;
+  if (!p) return;
+
+  p.hp = p.maxHp;
+  p.invulnTimer = 4.0;
+  game.resurrections = (game.resurrections || 0) + 1;
+
+  // Очищающий импульс (урон и сильное отбрасывание врагов)
+  const blastRadius = 480;
+  for (const e of game.enemies) {
+    const dist = Math.hypot(e.x - p.x, e.y - p.y);
+    if (dist <= blastRadius) {
+      damageEnemy(e, 90, p.x, p.y, 300);
+    }
+  }
+  game.enemyProjectiles = [];
+
+  spawnParticles(p.x, p.y, "#06d6a0", 35);
+  spawnParticles(p.x, p.y, "#ffd166", 25);
+  spawnParticles(p.x, p.y, "#ff2a85", 25);
+  addFloatingText(p.x, p.y - 55, "⚡ ВОСКРЕШЕНИЕ! ⚡", "#06d6a0", 30);
+  game.shakeTime = 0.4;
+  game.shakeMag = 9;
+  sfx.resurrect();
+
+  updateHud();
+}
+
+function dismissDeathSlot() {
+  if (deathSlot.spinInterval) {
+    clearInterval(deathSlot.spinInterval);
+    deathSlot.spinInterval = null;
+  }
+  deathSlot.active = false;
+  deathSlot.spinning = false;
+  game.deathSlotActive = false;
+  deathSlotModal.classList.add("hidden");
+  slotResultBanner.classList.add("hidden");
+  finishRun("ВЫ ПАЛИ В БОЮ");
 }
 
 async function finishRun(titleText = "ЗАБЕГ ЗАВЕРШЁН") {
   if (game.over) return;
   game.over = true;
   game.running = false;
+  game.deathSlotActive = false;
+  deathSlot.active = false;
+  if (deathSlotModal) deathSlotModal.classList.add("hidden");
   pauseModal.classList.add("hidden");
   levelUpModal.classList.add("hidden");
 
@@ -2018,12 +2266,12 @@ function renderGame() {
   ctx.save();
   ctx.translate(camX, camY);
 
-  // 1. Бесконечная неоновая сетка арены
+  // 1. БЕСКОНЕЧНЫЙ НЕОНОВЫЙ КИБЕР-ПОЛ С СЕТКОЙ И УЗЛАМИ
   const gridSize = 80;
-  const startX = Math.floor((p.x - canvas.width / 2) / gridSize) * gridSize;
-  const endX = p.x + canvas.width / 2 + gridSize;
-  const startY = Math.floor((p.y - canvas.height / 2) / gridSize) * gridSize;
-  const endY = p.y + canvas.height / 2 + gridSize;
+  const startX = Math.floor((p.x - canvas.width / 2) / gridSize) * gridSize - gridSize;
+  const endX = p.x + canvas.width / 2 + gridSize * 2;
+  const startY = Math.floor((p.y - canvas.height / 2) / gridSize) * gridSize - gridSize;
+  const endY = p.y + canvas.height / 2 + gridSize * 2;
 
   ctx.strokeStyle = "rgba(79, 172, 254, 0.08)";
   ctx.lineWidth = 1;
@@ -2038,117 +2286,430 @@ function renderGame() {
   }
   ctx.stroke();
 
-  // Декоративные пилоны на карте
-  for (const pr of game.props) {
-    if (Math.abs(pr.x - p.x) > canvas.width || Math.abs(pr.y - p.y) > canvas.height) continue;
-    ctx.fillStyle = `hsla(${pr.hue}, 80%, 50%, 0.08)`;
-    ctx.strokeStyle = `hsla(${pr.hue}, 90%, 60%, 0.22)`;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(pr.x, pr.y, pr.size, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-  }
-
-  // 2. Аура Искажения
-  if (p.weapons.aura) {
-    const lvl = p.weapons.aura;
-    const auraR = 88 + lvl * 14 + Math.sin(p.auraPulse) * 4;
-    const grad = ctx.createRadialGradient(p.x, p.y, 10, p.x, p.y, auraR);
-    grad.addColorStop(0, "rgba(181, 55, 242, 0.03)");
-    grad.addColorStop(0.75, "rgba(181, 55, 242, 0.14)");
-    grad.addColorStop(1, "rgba(0, 242, 254, 0.32)");
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, auraR, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // 3. Кристаллы опыта, монеты и бонусы
-  for (const g of game.gems) {
-    if (g.kind === "xp") {
-      ctx.fillStyle = g.value >= 25 ? "#ff2a85" : g.value >= 5 ? "#06d6a0" : "#00f2fe";
-      ctx.beginPath();
-      ctx.moveTo(g.x, g.y - 6);
-      ctx.lineTo(g.x + 5, g.y);
-      ctx.lineTo(g.x, g.y + 6);
-      ctx.lineTo(g.x - 5, g.y);
-      ctx.closePath();
-      ctx.fill();
-    } else if (g.kind === "gold") {
-      ctx.fillStyle = "#ffd166";
-      ctx.beginPath();
-      ctx.arc(g.x, g.y, 6.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = "#fff";
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-    } else if (g.kind === "heal") {
-      ctx.fillStyle = "#06d6a0";
-      ctx.fillRect(g.x - 7, g.y - 2.5, 14, 5);
-      ctx.fillRect(g.x - 2.5, g.y - 7, 5, 14);
-    } else if (g.kind === "vacuum") {
-      ctx.strokeStyle = "#00f2fe";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(g.x, g.y, 8, 0, Math.PI * 2);
-      ctx.stroke();
+  // Неоновые перекрестия узлов сетки (+)
+  ctx.fillStyle = "rgba(0, 242, 254, 0.35)";
+  const crossSize = 3;
+  for (let gx = startX; gx <= endX; gx += gridSize) {
+    for (let gy = startY; gy <= endY; gy += gridSize) {
+      ctx.fillRect(gx - crossSize, gy - 0.5, crossSize * 2, 1);
+      ctx.fillRect(gx - 0.5, gy - crossSize, 1, crossSize * 2);
     }
   }
 
-  // 4. Враги
+  // ДЕКОРАТИВНЫЕ ЭНЕРГЕТИЧЕСКИЕ ОБЕЛИСКИ НА КАРТЕ
+  for (const pr of game.props) {
+    if (Math.abs(pr.x - p.x) > canvas.width || Math.abs(pr.y - p.y) > canvas.height) continue;
+    ctx.save();
+    ctx.translate(pr.x, pr.y);
+
+    ctx.fillStyle = "rgba(15, 23, 42, 0.75)";
+    ctx.strokeStyle = "hsla(" + pr.hue + ", 90%, 60%, 0.35)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let s = 0; s < 8; s++) {
+      const a = (Math.PI * 2 * s) / 8;
+      const px = Math.cos(a) * pr.size;
+      const py = Math.sin(a) * pr.size;
+      if (s === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    const ringAngle = game.time * 0.8 + pr.x * 0.01;
+    ctx.strokeStyle = "hsla(" + pr.hue + ", 90%, 65%, 0.5)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, pr.size * 0.65, ringAngle, ringAngle + Math.PI * 1.5);
+    ctx.stroke();
+
+    const cryAngle = -game.time * 1.2;
+    ctx.rotate(cryAngle);
+    ctx.fillStyle = "hsla(" + pr.hue + ", 95%, 65%, 0.8)";
+    ctx.beginPath();
+    ctx.moveTo(0, -pr.size * 0.4);
+    ctx.lineTo(pr.size * 0.3, 0);
+    ctx.lineTo(0, pr.size * 0.4);
+    ctx.lineTo(-pr.size * 0.3, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // 2. АУРА ИСКАЖЕНИЯ (WARP FIELD)
+  if (p.weapons.aura) {
+    const lvl = p.weapons.aura;
+    const auraR = 88 + lvl * 14 + Math.sin(p.auraPulse) * 4;
+
+    ctx.save();
+    ctx.translate(p.x, p.y);
+
+    const grad = ctx.createRadialGradient(0, 0, 10, 0, 0, auraR);
+    grad.addColorStop(0, "rgba(181, 55, 242, 0.04)");
+    grad.addColorStop(0.7, "rgba(181, 55, 242, 0.16)");
+    grad.addColorStop(0.95, "rgba(0, 242, 254, 0.28)");
+    grad.addColorStop(1, "rgba(0, 242, 254, 0.45)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(0, 0, auraR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.save();
+    ctx.rotate(p.auraPulse * 0.35);
+    ctx.strokeStyle = "rgba(0, 242, 254, 0.5)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([12, 16]);
+    ctx.beginPath();
+    ctx.arc(0, 0, auraR * 0.88, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.rotate(-p.auraPulse * 0.7);
+    ctx.strokeStyle = "rgba(181, 55, 242, 0.6)";
+    ctx.setLineDash([8, 12]);
+    ctx.beginPath();
+    ctx.arc(0, 0, auraR * 0.58, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.strokeStyle = "rgba(0, 242, 254, 0.65)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, auraR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // 3. КРИСТАЛЛЫ ОПЫТА, МОНЕТЫ И БОНУСЫ (PICKUPS)
+  for (const g of game.gems) {
+    ctx.save();
+    ctx.translate(g.x, g.y);
+
+    if (g.kind === "xp") {
+      const bob = Math.sin(game.time * 4 + g.x * 0.2) * 2.5;
+      ctx.translate(0, bob);
+      const isLarge = g.value >= 25;
+      const isMed = g.value >= 5;
+      const color = isLarge ? "#ff2a85" : isMed ? "#06d6a0" : "#00f2fe";
+      const rad = isLarge ? 8 : isMed ? 6.5 : 5.5;
+
+      ctx.fillStyle = isLarge ? "rgba(255, 42, 133, 0.25)" : "rgba(0, 242, 254, 0.25)";
+      ctx.beginPath();
+      ctx.arc(0, 0, rad * 1.8, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(0, -rad * 1.25);
+      ctx.lineTo(rad, -rad * 0.2);
+      ctx.lineTo(rad * 0.7, rad * 1.1);
+      ctx.lineTo(0, rad * 1.4);
+      ctx.lineTo(-rad * 0.7, rad * 1.1);
+      ctx.lineTo(-rad, -rad * 0.2);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
+      ctx.beginPath();
+      ctx.moveTo(0, -rad * 1.25);
+      ctx.lineTo(rad * 0.5, -rad * 0.2);
+      ctx.lineTo(0, 0);
+      ctx.lineTo(-rad * 0.5, -rad * 0.2);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+    } else if (g.kind === "gold") {
+      const spin = Math.cos(game.time * 4.5 + g.x * 0.5);
+      const wScale = Math.max(0.12, Math.abs(spin));
+      ctx.scale(wScale, 1);
+
+      ctx.fillStyle = "rgba(255, 209, 102, 0.25)";
+      ctx.beginPath();
+      ctx.arc(0, 0, 11, 0, Math.PI * 2);
+      ctx.fill();
+
+      const coinGrad = ctx.createLinearGradient(-7, -7, 7, 7);
+      coinGrad.addColorStop(0, "#ffe066");
+      coinGrad.addColorStop(0.5, "#ffd166");
+      coinGrad.addColorStop(1, "#d49b00");
+      ctx.fillStyle = coinGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, 7, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(-1.5, -3.5, 3, 7);
+      ctx.fillRect(-3.5, -1.5, 7, 3);
+
+    } else if (g.kind === "heal") {
+      const pulse = 1 + Math.sin(game.time * 6) * 0.12;
+      ctx.scale(pulse, pulse);
+
+      ctx.fillStyle = "rgba(6, 214, 160, 0.3)";
+      ctx.beginPath();
+      ctx.arc(0, 0, 12, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#06d6a0";
+      ctx.beginPath();
+      ctx.rect(-8, -8, 16, 16);
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(-6, -2, 12, 4);
+      ctx.fillRect(-2, -6, 4, 12);
+
+    } else if (g.kind === "vacuum") {
+      const rot = game.time * 4;
+      ctx.rotate(rot);
+      ctx.strokeStyle = "#00f2fe";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, 9, 0, Math.PI * 1.6);
+      ctx.stroke();
+
+      ctx.strokeStyle = "#ff2a85";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 5, Math.PI, Math.PI * 2.6);
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  // 4. ДЕТАЛИЗИРОВАННЫЕ ВРАГИ (С КИБЕР-ТЕКСТУРАМИ)
   for (const e of game.enemies) {
     ctx.save();
     ctx.translate(e.x, e.y);
-    ctx.fillStyle = e.hitFlash > 0 ? "#ffffff" : e.color;
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = e.isBoss ? 3 : 1.5;
 
-    ctx.beginPath();
-    if (e.shape === "diamond") {
-      ctx.moveTo(0, -e.radius);
-      ctx.lineTo(e.radius, 0);
-      ctx.lineTo(0, e.radius);
-      ctx.lineTo(-e.radius, 0);
+    const isHit = e.hitFlash > 0;
+    const toPlayerAngle = Math.atan2(p.y - e.y, p.x - e.x);
+
+    if (e.type === "swarmer") {
+      ctx.rotate(toPlayerAngle);
+
+      const wingFlap = Math.sin(game.time * 42 + e.x) * (e.radius * 0.9);
+      ctx.fillStyle = "rgba(0, 242, 254, 0.45)";
+      ctx.beginPath();
+      ctx.ellipse(-2, -e.radius * 0.8, e.radius * 0.4, Math.abs(wingFlap) + 3, 0.3, 0, Math.PI * 2);
+      ctx.ellipse(-2, e.radius * 0.8, e.radius * 0.4, Math.abs(wingFlap) + 3, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = isHit ? "#ffffff" : "#d946ef";
+      ctx.beginPath();
+      ctx.moveTo(e.radius * 1.2, 0);
+      ctx.lineTo(-e.radius * 0.4, -e.radius * 0.75);
+      ctx.lineTo(-e.radius * 1.1, 0);
+      ctx.lineTo(-e.radius * 0.4, e.radius * 0.75);
       ctx.closePath();
-    } else if (e.shape === "hex" || e.shape === "boss") {
-      const sides = e.isBoss ? 8 : 6;
-      for (let s = 0; s < sides; s++) {
-        const a = (Math.PI * 2 * s) / sides;
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      ctx.fillStyle = "#ff2a85";
+      ctx.beginPath();
+      ctx.arc(e.radius * 0.6, -e.radius * 0.25, 2, 0, Math.PI * 2);
+      ctx.arc(e.radius * 0.6, e.radius * 0.25, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+    } else if (e.type === "brute") {
+      ctx.rotate(toPlayerAngle);
+
+      ctx.fillStyle = isHit ? "#ffffff" : "#2a1508";
+      ctx.strokeStyle = isHit ? "#ffffff" : "#f97316";
+      ctx.lineWidth = 2.5;
+
+      ctx.beginPath();
+      for (let s = 0; s < 8; s++) {
+        const a = (Math.PI * 2 * s) / 8;
         const px = Math.cos(a) * e.radius;
         const py = Math.sin(a) * e.radius;
         if (s === 0) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       }
       ctx.closePath();
-    } else if (e.shape === "triangle") {
-      ctx.moveTo(0, -e.radius);
-      ctx.lineTo(e.radius, e.radius);
-      ctx.lineTo(-e.radius, e.radius);
-      ctx.closePath();
-    } else {
-      ctx.arc(0, 0, e.radius, 0, Math.PI * 2);
-    }
-    ctx.fill();
-    ctx.stroke();
+      ctx.fill();
+      ctx.stroke();
 
-    // Полоска HP у раненых врагов
+      ctx.fillStyle = "#ea580c";
+      ctx.fillRect(-e.radius * 0.8, -e.radius * 1.05, e.radius * 0.7, e.radius * 0.4);
+      ctx.fillRect(-e.radius * 0.8, e.radius * 0.65, e.radius * 0.7, e.radius * 0.4);
+
+      const corePulse = Math.sin(game.time * 6) * 2;
+      const coreGrad = ctx.createRadialGradient(0, 0, 1, 0, 0, e.radius * 0.55);
+      coreGrad.addColorStop(0, "#ffffff");
+      coreGrad.addColorStop(0.5, "#ffedd5");
+      coreGrad.addColorStop(1, "#f97316");
+      ctx.fillStyle = coreGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.radius * 0.42 + corePulse, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#ef4444";
+      ctx.fillRect(e.radius * 0.4, -4, 4, 8);
+
+    } else if (e.type === "phantom") {
+      ctx.rotate(toPlayerAngle);
+      ctx.globalAlpha = 0.85 + Math.sin(game.time * 6 + e.x) * 0.15;
+
+      ctx.fillStyle = isHit ? "#ffffff" : "#0c4a6e";
+      ctx.strokeStyle = "#38bdf8";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(e.radius * 1.3, 0);
+      ctx.lineTo(-e.radius * 0.9, -e.radius);
+      ctx.lineTo(-e.radius * 0.5, 0);
+      ctx.lineTo(-e.radius * 0.9, e.radius);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#00f2fe";
+      ctx.beginPath();
+      ctx.arc(e.radius * 0.9, 0, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(0, 0, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+    } else if (e.isBoss) {
+      const bossSpin = game.time * 1.2;
+      const pylonCount = 8;
+      for (let s = 0; s < pylonCount; s++) {
+        const a = bossSpin + (Math.PI * 2 * s) / pylonCount;
+        const px = Math.cos(a) * (e.radius * 1.45);
+        const py = Math.sin(a) * (e.radius * 1.45);
+
+        ctx.fillStyle = "#ff2a85";
+        ctx.beginPath();
+        ctx.arc(px, py, 5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "rgba(255, 42, 133, 0.4)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(px, py);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = isHit ? "#ffffff" : "#1a051d";
+      ctx.strokeStyle = "#ff2a85";
+      ctx.lineWidth = 3.5;
+      ctx.beginPath();
+      for (let s = 0; s < 8; s++) {
+        const a = (Math.PI * 2 * s) / 8;
+        const px = Math.cos(a) * e.radius;
+        const py = Math.sin(a) * e.radius;
+        if (s === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      for (let s = 0; s < 4; s++) {
+        const a = (Math.PI * 2 * s) / 4 + Math.PI / 4;
+        const sx = Math.cos(a) * (e.radius * 1.25);
+        const sy = Math.sin(a) * (e.radius * 1.25);
+        ctx.fillStyle = "#ffd166";
+        ctx.beginPath();
+        ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const eyeR = e.radius * 0.55;
+      const eyeDx = Math.cos(toPlayerAngle) * (eyeR * 0.35);
+      const eyeDy = Math.sin(toPlayerAngle) * (eyeR * 0.35);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(0, 0, eyeR, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#ff2a85";
+      ctx.beginPath();
+      ctx.arc(eyeDx, eyeDy, eyeR * 0.65, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#070812";
+      ctx.beginPath();
+      ctx.arc(eyeDx, eyeDy, eyeR * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+
+    } else {
+      ctx.rotate(toPlayerAngle);
+
+      ctx.fillStyle = isHit ? "#ffffff" : "#ef4444";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.moveTo(e.radius * 0.7, -e.radius * 0.4);
+      ctx.lineTo(e.radius * 1.2, -e.radius * 0.15);
+      ctx.lineTo(e.radius * 0.7, 0);
+      ctx.lineTo(e.radius * 1.2, e.radius * 0.15);
+      ctx.lineTo(e.radius * 0.7, e.radius * 0.4);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#ffd166";
+      ctx.beginPath();
+      ctx.arc(e.radius * 0.2, 0, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
     if (e.hp < e.maxHp && !e.isBoss) {
       const w = e.radius * 1.8;
       ctx.fillStyle = "rgba(0,0,0,0.65)";
-      ctx.fillRect(-w / 2, -e.radius - 9, w, 4);
+      ctx.fillRect(-w / 2, -e.radius - 10, w, 4);
       ctx.fillStyle = "#ef4444";
-      ctx.fillRect(-w / 2, -e.radius - 9, w * (e.hp / e.maxHp), 4);
+      ctx.fillRect(-w / 2, -e.radius - 10, w * (e.hp / e.maxHp), 4);
     }
+
     ctx.restore();
   }
 
-  // 5. Орбитальные клинки
+  // 5. ОРБИТАЛЬНЫЕ КЛИНКИ (CYBER GLAIVES С ОРБИТАЛЬНЫМИ ШЛЕЙФАМИ)
   if (p.weapons.blades) {
     const lvl = p.weapons.blades;
     const count = Math.min(7, 1 + lvl);
     const orbitRadius = 72 + lvl * 6;
-    const bladeRadius = 11 + lvl * 1.1;
+    const bladeRadius = 13 + lvl * 1.1;
+
+    ctx.strokeStyle = "rgba(0, 242, 254, 0.14)";
+    ctx.lineWidth = bladeRadius * 0.85;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, orbitRadius, 0, Math.PI * 2);
+    ctx.stroke();
 
     for (let i = 0; i < count; i++) {
       const a = p.bladeAngle + (Math.PI * 2 * i) / count;
@@ -2157,95 +2718,279 @@ function renderGame() {
 
       ctx.save();
       ctx.translate(bx, by);
-      ctx.rotate(a * 2);
-      ctx.fillStyle = "#00f2fe";
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
+      ctx.rotate(a * 3.5);
+
+      for (let w = 0; w < 3; w++) {
+        const wingA = (Math.PI * 2 * w) / 3;
+        ctx.save();
+        ctx.rotate(wingA);
+
+        const bladeGrad = ctx.createLinearGradient(0, 0, bladeRadius * 1.2, 0);
+        bladeGrad.addColorStop(0, "#ffffff");
+        bladeGrad.addColorStop(0.4, "#00f2fe");
+        bladeGrad.addColorStop(1, "rgba(79, 172, 254, 0.1)");
+        ctx.fillStyle = bladeGrad;
+        ctx.beginPath();
+        ctx.moveTo(0, -3);
+        ctx.lineTo(bladeRadius * 1.25, 0);
+        ctx.lineTo(0, 3);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.fillStyle = "#0f172a";
       ctx.beginPath();
-      ctx.moveTo(0, -bladeRadius);
-      ctx.lineTo(bladeRadius * 0.65, 0);
-      ctx.lineTo(0, bladeRadius);
-      ctx.lineTo(-bladeRadius * 0.65, 0);
-      ctx.closePath();
+      ctx.arc(0, 0, bladeRadius * 0.35, 0, Math.PI * 2);
       ctx.fill();
+      ctx.strokeStyle = "#00f2fe";
+      ctx.lineWidth = 1.5;
       ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(0, 0, bladeRadius * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+
       ctx.restore();
     }
   }
 
-  // 6. Дуги Клинка Пустоты
+  // 6. ДУГИ КЛИНКА ПУСТОТЫ (РАЗРЫВ ПРОСТРАНСТВА / СЕРПОВИДНЫЙ ВСПЛЕСК)
   for (const sl of game.slashes) {
     const alpha = sl.life / sl.maxLife;
     ctx.save();
     ctx.translate(sl.x, sl.y);
-    ctx.strokeStyle = `rgba(181, 55, 242, ${alpha})`;
-    ctx.lineWidth = 16 * alpha;
+
+    ctx.strokeStyle = "rgba(181, 55, 242, " + (0.4 * alpha) + ")";
+    ctx.lineWidth = 26 * alpha;
     ctx.beginPath();
-    ctx.arc(0, 0, sl.range * 0.78, sl.angle - 0.85, sl.angle + 0.85);
+    ctx.arc(0, 0, sl.range * 0.78, sl.angle - 0.9, sl.angle + 0.9);
     ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255, 42, 133, " + (0.85 * alpha) + ")";
+    ctx.lineWidth = 14 * alpha;
+    ctx.beginPath();
+    ctx.arc(0, 0, sl.range * 0.82, sl.angle - 0.85, sl.angle + 0.85);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255, 255, 255, " + alpha + ")";
+    ctx.lineWidth = 3.5 * alpha;
+    ctx.beginPath();
+    ctx.arc(0, 0, sl.range * 0.85, sl.angle - 0.8, sl.angle + 0.8);
+    ctx.stroke();
+
     ctx.restore();
   }
 
-  // 7. Дуги Цепной Молнии
+  // 7. ЦЕПНАЯ МОЛНИЯ (МНОГОСЛОЙНЫЙ ВЫСОКОВОЛЬТНЫЙ РАЗРЯД)
   for (const arc of game.lightningArcs) {
     const alpha = arc.life / arc.maxLife;
-    ctx.strokeStyle = `rgba(255, 209, 102, ${alpha})`;
-    ctx.lineWidth = 3.5;
+
+    ctx.strokeStyle = "rgba(255, 209, 102, " + (0.45 * alpha) + ")";
+    ctx.lineWidth = 9;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.beginPath();
     arc.points.forEach((pt, idx) => {
       if (idx === 0) ctx.moveTo(pt.x, pt.y);
       else {
-        const midX = (arc.points[idx - 1].x + pt.x) / 2 + (Math.random() - 0.5) * 18;
-        const midY = (arc.points[idx - 1].y + pt.y) / 2 + (Math.random() - 0.5) * 18;
+        const midX = (arc.points[idx - 1].x + pt.x) / 2 + (Math.random() - 0.5) * 14;
+        const midY = (arc.points[idx - 1].y + pt.y) / 2 + (Math.random() - 0.5) * 14;
         ctx.lineTo(midX, midY);
         ctx.lineTo(pt.x, pt.y);
       }
     });
     ctx.stroke();
+
+    ctx.strokeStyle = "rgba(0, 242, 254, " + (0.85 * alpha) + ")";
+    ctx.lineWidth = 4.5;
+    ctx.beginPath();
+    arc.points.forEach((pt, idx) => {
+      if (idx === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    });
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255, 255, 255, " + alpha + ")";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    arc.points.forEach((pt) => {
+      ctx.fillStyle = "rgba(255, 255, 255, " + alpha + ")";
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    });
   }
 
-  // 8. Снаряды игрока и врагов
+  // 8. СНАРЯДЫ ИГРОКА (ПЛАЗМЕННЫЕ КОМЕТЫ) И ВРАГОВ
   for (const pr of game.projectiles) {
-    ctx.fillStyle = pr.color;
+    ctx.save();
+    ctx.translate(pr.x, pr.y);
+    const pAngle = Math.atan2(pr.vy, pr.vx);
+    ctx.rotate(pAngle);
+
+    const pGlow = ctx.createRadialGradient(0, 0, 2, 0, 0, pr.radius * 3);
+    pGlow.addColorStop(0, "rgba(0, 242, 254, 0.85)");
+    pGlow.addColorStop(0.5, "rgba(79, 172, 254, 0.4)");
+    pGlow.addColorStop(1, "rgba(0, 242, 254, 0)");
+    ctx.fillStyle = pGlow;
     ctx.beginPath();
-    ctx.arc(pr.x, pr.y, pr.radius, 0, Math.PI * 2);
+    ctx.arc(0, 0, pr.radius * 3, 0, Math.PI * 2);
     ctx.fill();
+
+    const tailLen = pr.radius * 3.8;
+    const tailGrad = ctx.createLinearGradient(-tailLen, 0, pr.radius, 0);
+    tailGrad.addColorStop(0, "rgba(0, 242, 254, 0)");
+    tailGrad.addColorStop(0.7, "#00f2fe");
+    tailGrad.addColorStop(1, "#ffffff");
+    ctx.fillStyle = tailGrad;
+    ctx.beginPath();
+    ctx.moveTo(pr.radius, 0);
+    ctx.lineTo(-tailLen, -pr.radius * 0.7);
+    ctx.lineTo(-tailLen * 1.3, 0);
+    ctx.lineTo(-tailLen, pr.radius * 0.7);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(0, 0, pr.radius * 0.75, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
   }
 
   for (const ep of game.enemyProjectiles) {
+    ctx.save();
+    ctx.translate(ep.x, ep.y);
+    const epAngle = Math.atan2(ep.vy, ep.vx);
+    ctx.rotate(epAngle);
+
+    const epGlow = ctx.createRadialGradient(0, 0, 2, 0, 0, ep.radius * 2.8);
+    epGlow.addColorStop(0, "rgba(255, 42, 133, 0.9)");
+    epGlow.addColorStop(0.6, "rgba(239, 68, 68, 0.35)");
+    epGlow.addColorStop(1, "rgba(255, 42, 133, 0)");
+    ctx.fillStyle = epGlow;
+    ctx.beginPath();
+    ctx.arc(0, 0, ep.radius * 2.8, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.fillStyle = "#ff2a85";
     ctx.beginPath();
-    ctx.arc(ep.x, ep.y, ep.radius, 0, Math.PI * 2);
+    ctx.arc(0, 0, ep.radius, 0, Math.PI * 2);
     ctx.fill();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(0, 0, ep.radius * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
-  // 9. Игрок (Герой)
+  // 9. ИГРОК (КИБЕР-НИНДЗЯ / МЕХ-ВЫЖИВШИЙ)
   ctx.save();
   ctx.translate(p.x, p.y);
-  const glowGrad = ctx.createRadialGradient(0, 0, 4, 0, 0, p.radius * 2.1);
-  glowGrad.addColorStop(0, "rgba(0, 242, 254, 0.55)");
-  glowGrad.addColorStop(1, "rgba(0, 242, 254, 0)");
-  ctx.fillStyle = glowGrad;
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
   ctx.beginPath();
-  ctx.arc(0, 0, p.radius * 2.1, 0, Math.PI * 2);
+  ctx.ellipse(0, p.radius * 0.85, p.radius * 1.1, p.radius * 0.45, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = p.invulnTimer > 0 && Math.floor(p.invulnTimer * 20) % 2 === 0 ? "#ffffff" : "#00f2fe";
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 2.5;
+  const heroAngle = Math.atan2(p.facingY, p.facingX);
+
+  const isMoving = input.keys["KeyW"] || input.keys["KeyS"] || input.keys["KeyA"] || input.keys["KeyD"] || input.mouseDown;
+  const flameLen = isMoving ? 14 + Math.random() * 8 : 4;
+  const backAngle = heroAngle + Math.PI;
+
+  ctx.fillStyle = "#00f2fe";
+  ctx.beginPath();
+  ctx.moveTo(Math.cos(backAngle + 0.4) * p.radius, Math.sin(backAngle + 0.4) * p.radius);
+  ctx.lineTo(Math.cos(backAngle) * (p.radius + flameLen), Math.sin(backAngle) * (p.radius + flameLen));
+  ctx.lineTo(Math.cos(backAngle - 0.4) * p.radius, Math.sin(backAngle - 0.4) * p.radius);
+  ctx.closePath();
+  ctx.fill();
+
+  const heroGlow = ctx.createRadialGradient(0, 0, 4, 0, 0, p.radius * 2.2);
+  heroGlow.addColorStop(0, "rgba(0, 242, 254, 0.4)");
+  heroGlow.addColorStop(1, "rgba(0, 242, 254, 0)");
+  ctx.fillStyle = heroGlow;
+  ctx.beginPath();
+  ctx.arc(0, 0, p.radius * 2.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.rotate(heroAngle);
+
+  ctx.fillStyle = "#0d1b2a";
+  ctx.fillRect(-p.radius * 0.6, -p.radius * 1.1, p.radius * 0.7, p.radius * 2.2);
+  ctx.strokeStyle = "#00f2fe";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(-p.radius * 0.6, -p.radius * 1.1, p.radius * 0.7, p.radius * 2.2);
+
+  const bodyGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, p.radius);
+  bodyGrad.addColorStop(0, "#1b263b");
+  bodyGrad.addColorStop(0.7, "#0d1b2a");
+  bodyGrad.addColorStop(1, "#00f2fe");
+  ctx.fillStyle = bodyGrad;
   ctx.beginPath();
   ctx.arc(0, 0, p.radius, 0, Math.PI * 2);
   ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
   ctx.stroke();
 
-  // Визор по направлению взгляда
+  ctx.fillStyle = "#415a77";
+  ctx.fillRect(p.radius * 0.4, p.radius * 0.5, p.radius * 0.8, 5);
+  ctx.fillStyle = "#00f2fe";
+  ctx.fillRect(p.radius * 1.1, p.radius * 0.5, 3, 5);
+
   ctx.fillStyle = "#070812";
   ctx.beginPath();
-  ctx.arc(p.facingX * 6, p.facingY * 6, 5, 0, Math.PI * 2);
+  ctx.arc(p.radius * 0.35, 0, p.radius * 0.5, 0, Math.PI * 2);
   ctx.fill();
+
+  ctx.fillStyle = p.invulnTimer > 0 && Math.floor(p.invulnTimer * 20) % 2 === 0 ? "#ffffff" : "#00f2fe";
+  ctx.beginPath();
+  ctx.arc(p.radius * 0.5, 0, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  const reactorPulse = 1 + Math.sin(game.time * 8) * 0.2;
+  ctx.fillStyle = "#ffd166";
+  ctx.beginPath();
+  ctx.arc(-p.radius * 0.1, 0, 3.5 * reactorPulse, 0, Math.PI * 2);
+  ctx.fill();
+
   ctx.restore();
 
-  // 10. Частицы и всплывающие цифры урона
+  if (p.invulnTimer > 0) {
+    const shieldR = p.radius * 2.1;
+    const shieldGrad = ctx.createRadialGradient(0, 0, shieldR * 0.6, 0, 0, shieldR);
+    shieldGrad.addColorStop(0, "rgba(6, 214, 160, 0.08)");
+    shieldGrad.addColorStop(0.8, "rgba(255, 209, 102, 0.35)");
+    shieldGrad.addColorStop(1, "rgba(6, 214, 160, 0.85)");
+    ctx.fillStyle = shieldGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, shieldR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.arc(0, 0, shieldR, game.time * 2, game.time * 2 + Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
+
+  // 10. ЧАСТИЦЫ И ЦИФРЫ УРОНА
   for (const pt of game.particles) {
     ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
     ctx.fillStyle = pt.color;
@@ -2255,7 +3000,7 @@ function renderGame() {
 
   for (const ft of game.floatingTexts) {
     ctx.globalAlpha = Math.max(0, ft.life / ft.maxLife);
-    ctx.font = `900 ${ft.size}px system-ui, sans-serif`;
+    ctx.font = "900 " + ft.size + "px system-ui, sans-serif";
     ctx.fillStyle = ft.color;
     ctx.textAlign = "center";
     ctx.fillText(ft.text, ft.x, ft.y);
@@ -2395,6 +3140,41 @@ function initEvents() {
   };
   document.getElementById("btnMuteHud").addEventListener("click", handleMute);
   document.getElementById("btnMuteMenu").addEventListener("click", handleMute);
+
+  // Слот-машина при смерти
+  if (btnSpinSlot) btnSpinSlot.addEventListener("click", spinDeathSlot);
+  if (btnCheatHearts) {
+    btnCheatHearts.addEventListener("click", () => {
+      deathSlot.cheatAlwaysWin = !deathSlot.cheatAlwaysWin;
+      btnCheatHearts.classList.toggle("active", deathSlot.cheatAlwaysWin);
+      btnCheatHearts.textContent = deathSlot.cheatAlwaysWin ? "🍀 Удача 100% (ВКЛ)" : "🍀 Удача 100% (Тест)";
+    });
+  }
+  if (btnSkipSlot) btnSkipSlot.addEventListener("click", dismissDeathSlot);
+  if (btnConfirmResurrect) btnConfirmResurrect.addEventListener("click", resurrectPlayer);
+
+  // Синхронизация с Git / GitHub репозиторием
+  const btnSync = document.getElementById("btnSyncRepo");
+  if (btnSync) {
+    btnSync.addEventListener("click", async () => {
+      btnSync.classList.add("syncing");
+      btnSync.textContent = "⏳ Синхронизация...";
+      try {
+        const res = await apiRequest("/api/sync-db", "POST");
+        btnSync.textContent = res.message ? "✔ " + res.message.slice(0, 18) : "✔ Готово";
+        setTimeout(() => {
+          btnSync.classList.remove("syncing");
+          btnSync.textContent = "☁️ Git Sync";
+        }, 2800);
+      } catch (err) {
+        btnSync.textContent = "⚠ " + (err.message || "Ошибка");
+        setTimeout(() => {
+          btnSync.classList.remove("syncing");
+          btnSync.textContent = "☁️ Git Sync";
+        }, 2800);
+      }
+    });
+  }
 
   // Переключение вкладок Лидерборд / История
   const subLb = document.getElementById("subtabLeaderboard");

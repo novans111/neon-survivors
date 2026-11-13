@@ -5,13 +5,16 @@ Uses Python standard library (http.server + sqlite3 + hashlib + secrets)
 for zero external dependencies.
 """
 
+import atexit
 import hashlib
 import hmac
 import json
 import os
 import secrets
 import sqlite3
+import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +43,155 @@ UPGRADE_CONFIG = {
     "magnet": {"max_level": 8, "base_cost": 25, "cost_mult": 1.45, "name": "Магнит (+20% радиуса сбора)"},
     "greed": {"max_level": 8, "base_cost": 45, "cost_mult": 1.6, "name": "Алчность (+15% золота)"},
 }
+DUMP_PATH = os.path.join(BASE_DIR, "game_backup.sql")
+
+_sync_lock = threading.Lock()
+_sync_timer = None
+_sync_status = {
+    "status": "idle",
+    "message": "Ожидание изменений",
+    "time": datetime.now(timezone.utc).isoformat(),
+}
+
+
+def restore_from_dump_if_needed():
+    """Восстанавливает базу данных из game_backup.sql, если game.db отсутствует или пуста."""
+    if (not os.path.exists(DB_PATH) or os.path.getsize(DB_PATH) == 0) and os.path.exists(DUMP_PATH):
+        try:
+            print("[DB] Восстановление базы данных из game_backup.sql...", flush=True)
+            with sqlite3.connect(DB_PATH) as conn:
+                with open(DUMP_PATH, "r", encoding="utf-8") as f:
+                    conn.executescript(f.read())
+            print("[DB] База данных успешно восстановлена из резервной копии!", flush=True)
+        except Exception as e:
+            print(f"[DB] Ошибка восстановления из SQL-дампа: {e}", file=sys.stderr, flush=True)
+
+
+def checkpoint_and_export():
+    """Сбрасывает WAL в основной файл game.db и создаёт текстовый дамп SQL."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with open(DUMP_PATH, "w", encoding="utf-8") as f:
+                for line in conn.iterdump():
+                    f.write(f"{line}\n")
+    except Exception as e:
+        print(f"[DB] Ошибка создания резервной копии SQL: {e}", file=sys.stderr, flush=True)
+
+
+def perform_git_sync():
+    """Синхронизирует game.db и game_backup.sql с репозиторием Git (Codespace / GitHub)."""
+    global _sync_status
+    checkpoint_and_export()
+
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode != 0:
+            _sync_status = {
+                "status": "not_git",
+                "message": "Папка не является git-репозиторием",
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+            return _sync_status
+    except Exception as e:
+        _sync_status = {
+            "status": "error",
+            "message": f"Git недоступен: {e}",
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+        return _sync_status
+
+    try:
+        subprocess.run(
+            ["git", "add", "game.db", "game_backup.sql"],
+            cwd=BASE_DIR,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        diff = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=BASE_DIR,
+            capture_output=True,
+            timeout=10,
+        )
+        if diff.returncode == 0:
+            _sync_status = {
+                "status": "synced",
+                "message": "База данных актуальна, изменений нет",
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+            return _sync_status
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        commit_res = subprocess.run(
+            ["git", "commit", "-m", f"Auto-sync database: {now_str} [skip ci]"],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if commit_res.returncode != 0:
+            _sync_status = {
+                "status": "commit_error",
+                "message": commit_res.stderr.strip() or "Ошибка коммита",
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+            return _sync_status
+
+        push_res = subprocess.run(
+            ["git", "push"],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if push_res.returncode == 0:
+            print(f"[GIT AUTO-SYNC] ✔ База данных успешно выгружена в репозиторий ({now_str})", flush=True)
+            _sync_status = {
+                "status": "synced",
+                "message": f"✔ Успешно выгружено в репозиторий ({now_str})",
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+        else:
+            err = push_res.stderr.strip() or push_res.stdout.strip()
+            print(f"[GIT AUTO-SYNC] Внимание: коммит создан, push отклонён: {err}", file=sys.stderr, flush=True)
+            _sync_status = {
+                "status": "push_pending",
+                "message": f"Закоммичено локально. Ошибка push: {err[:50]}",
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+    except Exception as e:
+        print(f"[GIT AUTO-SYNC] Ошибка синхронизации: {e}", file=sys.stderr, flush=True)
+        _sync_status = {
+            "status": "error",
+            "message": f"Ошибка: {e}",
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+    return _sync_status
+
+
+def schedule_git_sync(delay_seconds=4.0):
+    """Отложенная синхронизация с Git (debounce), чтобы не спамить коммитами при частых запросах."""
+    global _sync_timer
+    with _sync_lock:
+        if _sync_timer is not None:
+            _sync_timer.cancel()
+        _sync_timer = threading.Timer(delay_seconds, perform_git_sync)
+        _sync_timer.daemon = True
+        _sync_timer.start()
+
+
+atexit.register(checkpoint_and_export)
+
 
 
 def get_db():
@@ -263,6 +415,8 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
                     }
                 )
 
+        if parsed.path == "/api/sync-status":
+            return self.send_json(_sync_status)
         if parsed.path == "/" or parsed.path == "":
             self.path = "/index.html"
         return super().do_GET()
@@ -272,6 +426,9 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
         body = self.read_json_body()
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+        if parsed.path == "/api/sync-db":
+            status = perform_git_sync()
+            return self.send_json(status)
         if parsed.path == "/api/register":
             username = str(body.get("username", "")).strip()
             password = str(body.get("password", ""))
@@ -317,6 +474,7 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
                     (token, user_id, now_iso),
                 )
                 user_row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+                schedule_git_sync(3.0)
                 return self.send_json(
                     {"token": token, "user": build_user_profile(conn, user_row)},
                     HTTPStatus.CREATED,
@@ -383,6 +541,7 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
                 updated_user = conn.execute(
                     "SELECT * FROM users WHERE id = ?", (user_row["id"],)
                 ).fetchone()
+                schedule_git_sync(3.0)
                 return self.send_json({"user": build_user_profile(conn, updated_user)})
 
         if parsed.path == "/api/runs":
@@ -425,6 +584,7 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
                 updated_user = conn.execute(
                     "SELECT * FROM users WHERE id = ?", (user_row["id"],)
                 ).fetchone()
+                schedule_git_sync(3.0)
                 return self.send_json(
                     {
                         "score": score,
@@ -437,8 +597,20 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
 
 
 def main():
+    if "--backup" in sys.argv:
+        checkpoint_and_export()
+        print(f"✔ Резервная копия сохранена в {DUMP_PATH}")
+        return
+    if "--sync" in sys.argv:
+        status = perform_git_sync()
+        print(f"✔ Статус синхронизации: {status['message']}")
+        return
+
     os.makedirs(STATIC_DIR, exist_ok=True)
+    restore_from_dump_if_needed()
     init_db()
+    checkpoint_and_export()
+
     port = int(os.environ.get("PORT", "8765"))
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("0.0.0.0", port), GameRequestHandler)
@@ -447,6 +619,7 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down server...")
+        checkpoint_and_export()
         server.server_close()
 
 
