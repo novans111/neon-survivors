@@ -1060,29 +1060,30 @@ const game = {
   lastSyncTime: 0,
 };
 
-// Менеджер сетевого взаимодействия (Гибридный: WebSocket для Codespaces/VPS + WebRTC PeerJS для GitHub Pages)
+// Менеджер сетевого взаимодействия (Универсальный MQTT WebSocket брокер + локальный WS)
 const network = {
+  client: null,
   ws: null,
-  peer: null,
-  peerConns: {}, // peerId/username -> DataConnection
   connected: false,
-  mode: "ws", // "ws" or "p2p"
+  mode: "mqtt", // "mqtt" or "ws"
+  roomTopic: null,
 
   isGitHubPages() {
     return window.location.hostname.endsWith("github.io");
   },
 
-  connect() {
+  connect(onReady) {
     if (this.isGitHubPages()) {
-      this.initPeerJs();
+      this.initMqtt(onReady);
       return;
     }
-    this.initWebSocket();
+    this.initWebSocket(onReady);
   },
 
-  initWebSocket() {
+  initWebSocket(onReady) {
     this.mode = "ws";
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      if (onReady) onReady();
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -1092,14 +1093,15 @@ const network = {
     try {
       this.ws = new WebSocket(url);
     } catch (e) {
-      console.warn("WebSocket not supported, fallback to P2P:", e);
-      this.initPeerJs();
+      console.warn("WebSocket failed, fallback to MQTT:", e);
+      this.initMqtt(onReady);
       return;
     }
 
     this.ws.onopen = () => {
       this.connected = true;
-      console.log("[Coop WS] Connected to Codespaces/Local relay server");
+      console.log("[Coop WS] Connected to relay server");
+      if (onReady) onReady();
     };
 
     this.ws.onmessage = (event) => {
@@ -1114,215 +1116,118 @@ const network = {
     this.ws.onclose = () => {
       this.connected = false;
       console.log("[Coop WS] Disconnected");
-      if (game.isCoop && game.running) {
-        addFloatingText(game.player.x, game.player.y - 50, "⚠ СВЯЗЬ С СЕРВЕРОМ ПОТЕРЯНА", "#ef4444", 18);
-      }
     };
 
     this.ws.onerror = (err) => {
-      console.warn("[Coop WS] Error, trying P2P fallback:", err);
-      this.initPeerJs();
+      console.warn("[Coop WS] Error, fallback to MQTT:", err);
+      this.initMqtt(onReady);
     };
   },
 
-  initPeerJs() {
-    this.mode = "p2p";
-    if (this.peer && !this.peer.destroyed) {
-      this.connected = true;
+  initMqtt(onReady) {
+    this.mode = "mqtt";
+    if (this.client && this.client.connected) {
+      if (onReady) onReady();
       return;
     }
-    if (typeof Peer === "undefined") {
-      console.warn("PeerJS library not loaded");
+    if (typeof mqtt === "undefined") {
+      console.warn("MQTT library not loaded");
+      alert("Сетевая библиотека не загрузилась. Проверьте интернет-соединение.");
       return;
     }
 
-    this.peer = new Peer({
-      debug: 1,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-        ],
-      },
-    });
+    const clientId = "neon_" + (appState.user?.username || "p") + "_" + Math.random().toString(16).slice(2, 8);
+    const brokerUrl = "wss://broker.emqx.io:8084/mqtt";
 
-    this.peer.on("open", (id) => {
+    try {
+      this.client = mqtt.connect(brokerUrl, {
+        clientId: clientId,
+        clean: true,
+        connectTimeout: 5000,
+        reconnectPeriod: 2000,
+      });
+    } catch (e) {
+      console.error("MQTT connect error:", e);
+      return;
+    }
+
+    this.client.on("connect", () => {
       this.connected = true;
-      console.log("[Coop P2P] PeerJS Ready, ID:", id);
+      console.log("[Coop MQTT] Connected to cloud broker wss://broker.emqx.io:8084/mqtt");
+      if (onReady) onReady();
     });
 
-    this.peer.on("connection", (conn) => {
-      this.setupPeerConn(conn);
-    });
-
-    this.peer.on("error", (err) => {
-      console.warn("[Coop P2P] Error:", err);
-    });
-  },
-
-  setupPeerConn(conn) {
-    conn.on("open", () => {
-      this.peerConns[conn.peer] = conn;
-      console.log("[Coop P2P] Connection opened with:", conn.peer);
-    });
-
-    conn.on("data", (data) => {
+    this.client.on("message", (topic, payload) => {
       try {
-        const msg = typeof data === "string" ? JSON.parse(data) : data;
+        const msg = JSON.parse(payload.toString());
+        // Игнорируем собственные эхо-сообщения
+        if (msg.senderClient === clientId) return;
         handleNetworkMessage(msg);
       } catch (e) {
-        console.error("P2P data parse error:", e);
+        console.error("MQTT message parse error:", e);
       }
     });
 
-    conn.on("close", () => {
-      delete this.peerConns[conn.peer];
-      console.log("[Coop P2P] Connection closed with:", conn.peer);
+    this.client.on("error", (err) => {
+      console.warn("[Coop MQTT] Error:", err);
+    });
+
+    this.client.on("close", () => {
+      this.connected = false;
+      console.log("[Coop MQTT] Disconnected");
     });
   },
 
-  createRoomP2P(username) {
+  createRoom(username) {
     const code = Math.floor(1000 + Math.random() * 9000).toString();
-    const peerRoomId = "neon-survivor-room-" + code;
-
-    game.coopRoom = code;
-    game.coopRole = "host";
-    game.coopPlayers = [username];
-    this.peerConns = {};
-    updateCoopLobbyUI();
-
-    if (this.peer) {
-      try {
-        this.peer.destroy();
-      } catch (_) {}
-    }
-
-    this.peer = new Peer(peerRoomId, {
-      debug: 2,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-          { urls: "stun:stun2.l.google.com:19302" },
-        ],
-      },
-    });
-
-    this.peer.on("open", (id) => {
-      this.connected = true;
-      console.log("[P2P Host] Opened broker connection with ID:", id);
-      handleNetworkMessage({
-        type: "room_created",
-        room: code,
-        host: username,
-        players: [username],
-      });
-    });
-
-    this.peer.on("connection", (conn) => {
-      console.log("[P2P Host] Incoming guest connection:", conn.peer);
-      this.setupPeerConn(conn);
-      conn.on("data", (raw) => {
-        const msg = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (msg.type === "join_room") {
-          const guestName = msg.username || "Guest";
-          conn.remoteUsername = guestName;
-          const allPlayers = [username];
-          Object.values(this.peerConns).forEach((c) => {
-            if (c.remoteUsername && !allPlayers.includes(c.remoteUsername)) {
-              allPlayers.push(c.remoteUsername);
-            }
-          });
-          conn.send({
-            type: "room_joined",
+    this.connect(() => {
+      if (this.mode === "mqtt") {
+        this.roomTopic = `neon-survivors/room/${code}`;
+        this.client.subscribe(this.roomTopic, (err) => {
+          if (err) {
+            alert("Ошибка подписки на комнату: " + err.message);
+            return;
+          }
+          console.log("[Coop MQTT] Host subscribed to:", this.roomTopic);
+          handleNetworkMessage({
+            type: "room_created",
             room: code,
             host: username,
-            players: allPlayers,
+            players: [username],
           });
-          this.broadcastP2P({
-            type: "player_joined",
-            username: guestName,
-            players: allPlayers,
-          });
+        });
+      } else {
+        this.send({ type: "create_room", username: username });
+      }
+    });
+  },
+
+  joinRoom(code, username) {
+    code = code.trim();
+    this.connect(() => {
+      if (this.mode === "mqtt") {
+        this.roomTopic = `neon-survivors/room/${code}`;
+        this.client.subscribe(this.roomTopic, (err) => {
+          if (err) {
+            alert("Ошибка подключения к комнате: " + err.message);
+            return;
+          }
+          console.log("[Coop MQTT] Guest subscribed to:", this.roomTopic);
           handleNetworkMessage({
-            type: "player_joined",
-            username: guestName,
-            players: allPlayers,
+            type: "room_joined",
+            room: code,
+            host: "Host",
+            players: [username],
           });
-        }
-      });
-    });
-
-    this.peer.on("error", (err) => {
-      console.warn("PeerJS Host Error:", err);
-      if (err.type === "unavailable-id") {
-        this.createRoomP2P(username);
+          // Отправляем хосту запрос о входе
+          this.send({
+            type: "guest_hello",
+            username: username,
+            room: code,
+          });
+        });
       } else {
-        alert("Ошибка создания комнаты: " + (err.message || err.type));
-      }
-    });
-  },
-
-  joinRoomP2P(code, username) {
-    const peerRoomId = "neon-survivor-room-" + code.trim();
-
-    game.coopRoom = code.trim();
-    game.coopRole = "guest";
-    game.coopPlayers = [username];
-    this.peerConns = {};
-    updateCoopLobbyUI();
-
-    if (this.peer) {
-      try {
-        this.peer.destroy();
-      } catch (_) {}
-    }
-
-    this.peer = new Peer({
-      debug: 2,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-          { urls: "stun:stun2.l.google.com:19302" },
-        ],
-      },
-    });
-
-    const connectToHost = () => {
-      console.log("[P2P Guest] Connecting to host:", peerRoomId);
-      const conn = this.peer.connect(peerRoomId, { reliable: true });
-      this.setupPeerConn(conn);
-      conn.on("open", () => {
-        console.log("[P2P Guest] Connected to host! Sending join_room...");
-        conn.send({ type: "join_room", username: username, room: code.trim() });
-      });
-      conn.on("error", (err) => {
-        console.warn("Guest connection error:", err);
-        alert("Не удалось подключиться к комнате #" + code + " (проверьте правильность кода или подождите 2-3 секунды)");
-      });
-    };
-
-    this.peer.on("open", (id) => {
-      console.log("[P2P Guest] Broker opened, our ID:", id);
-      connectToHost();
-    });
-
-    this.peer.on("error", (err) => {
-      console.warn("PeerJS Guest Error:", err);
-      if (err.type === "peer-unavailable") {
-        alert("Комната #" + code + " не найдена! Убедитесь, что создатель лобби находится в меню.");
-      } else {
-        alert("Ошибка сети P2P: " + (err.message || err.type));
-      }
-    });
-  },
-
-  broadcastP2P(data) {
-    const payload = JSON.stringify(data);
-    Object.values(this.peerConns).forEach((conn) => {
-      if (conn.open) {
-        conn.send(payload);
+        this.send({ type: "join_room", room: code, username: username });
       }
     });
   },
@@ -1332,8 +1237,11 @@ const network = {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify(data));
       }
-    } else if (this.mode === "p2p") {
-      this.broadcastP2P(data);
+    } else if (this.mode === "mqtt") {
+      if (this.client && this.client.connected && this.roomTopic) {
+        data.senderClient = this.client.options.clientId;
+        this.client.publish(this.roomTopic, JSON.stringify(data));
+      }
     }
   },
 };
@@ -1460,6 +1368,28 @@ function handleNetworkMessage(msg) {
     game.coopRole = "guest";
     game.coopPlayers = msg.players || [];
     updateCoopLobbyUI();
+  } else if (msg.type === "guest_hello") {
+    // Гость подключился к комнате через MQTT
+    if (game.coopRole === "host") {
+      const gName = msg.username || "Guest";
+      if (!game.coopPlayers.includes(gName)) {
+        game.coopPlayers.push(gName);
+      }
+      updateCoopLobbyUI();
+      sfx.coin();
+      // Отправляем гостю подтверждение со списком всех игроков
+      network.send({
+        type: "host_welcome",
+        host: appState.user?.username || "Host",
+        players: game.coopPlayers,
+      });
+    }
+  } else if (msg.type === "host_welcome") {
+    if (game.coopRole === "guest") {
+      game.coopPlayers = msg.players || [msg.host, appState.user?.username || "Guest"];
+      updateCoopLobbyUI();
+      sfx.coin();
+    }
   } else if (msg.type === "player_joined") {
     game.coopPlayers = msg.players || [];
     updateCoopLobbyUI();
@@ -3940,14 +3870,7 @@ function initEvents() {
   if (btnCreateRoom) {
     btnCreateRoom.addEventListener("click", () => {
       const myName = appState.user?.username || "Host";
-      if (network.isGitHubPages()) {
-        network.createRoomP2P(myName);
-      } else {
-        network.connect();
-        setTimeout(() => {
-          network.send({ type: "create_room", username: myName });
-        }, network.connected ? 0 : 250);
-      }
+      network.createRoom(myName);
     });
   }
 
@@ -3959,14 +3882,7 @@ function initEvents() {
         return;
       }
       const myName = appState.user?.username || "Guest";
-      if (network.isGitHubPages()) {
-        network.joinRoomP2P(code, myName);
-      } else {
-        network.connect();
-        setTimeout(() => {
-          network.send({ type: "join_room", room: code, username: myName });
-        }, network.connected ? 0 : 250);
-      }
+      network.joinRoom(code, myName);
     });
   }
 
@@ -3979,7 +3895,10 @@ function initEvents() {
   if (btnStartCoop) {
     btnStartCoop.addEventListener("click", () => {
       if (game.coopRole === "host" && game.coopRoom) {
-        network.send({ type: "start_game" });
+        // Уведомляем всех в комнате о старте игры
+        network.send({ type: "game_started" });
+        // И запускаем игру локально у себя
+        startNewRun(true);
       }
     });
   }
