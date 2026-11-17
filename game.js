@@ -1086,7 +1086,7 @@ const network = {
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.host || "localhost:8765";
+    const host = window.location.host;
     const url = `${protocol}//${host}/ws`;
 
     try {
@@ -1185,6 +1185,11 @@ const network = {
     const code = Math.floor(1000 + Math.random() * 9000).toString();
     const peerRoomId = "neon-survivor-room-" + code;
 
+    game.coopRoom = code;
+    game.coopRole = "host";
+    game.coopPlayers = [username];
+    updateCoopLobbyUI();
+
     if (this.peer) {
       try {
         this.peer.destroy();
@@ -1202,6 +1207,7 @@ const network = {
 
     this.peer.on("open", () => {
       this.connected = true;
+      console.log("[P2P] Room opened on PeerJS broker with ID:", peerRoomId);
       handleNetworkMessage({
         type: "room_created",
         room: code,
@@ -1232,6 +1238,11 @@ const network = {
             username: guestName,
             players: allPlayers,
           });
+          handleNetworkMessage({
+            type: "player_joined",
+            username: guestName,
+            players: allPlayers,
+          });
         }
       });
     });
@@ -1240,13 +1251,19 @@ const network = {
       if (err.type === "unavailable-id") {
         this.createRoomP2P(username);
       } else {
-        alert("Ошибка создания P2P комнаты: " + err.message);
+        console.warn("PeerJS room error:", err);
       }
     });
   },
 
   joinRoomP2P(code, username) {
     const peerRoomId = "neon-survivor-room-" + code.trim();
+
+    game.coopRoom = code.trim();
+    game.coopRole = "guest";
+    game.coopPlayers = [username];
+    updateCoopLobbyUI();
+
     if (!this.peer || this.peer.destroyed) {
       this.peer = new Peer({
         config: {
@@ -1262,10 +1279,10 @@ const network = {
       const conn = this.peer.connect(peerRoomId, { reliable: true });
       this.setupPeerConn(conn);
       conn.on("open", () => {
-        conn.send({ type: "join_room", username: username, room: code });
+        conn.send({ type: "join_room", username: username, room: code.trim() });
       });
       conn.on("error", (err) => {
-        alert("Не удалось подключиться к комнате #" + code + ": " + err.message);
+        console.warn("Connection to host error:", err);
       });
     };
 
