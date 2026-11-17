@@ -1407,12 +1407,13 @@ function handleNetworkMessage(msg) {
     startNewRun(true);
   } else if (msg.type === "player_sync") {
     // Состояние напарника
-    if (msg.sender && msg.sender !== (appState.user?.username || "")) {
-      game.remotePlayers[msg.sender] = {
+    const sName = msg.sender || (game.coopRole === "host" ? "Guest" : "Host");
+    if (sName !== (appState.user?.username || "")) {
+      game.remotePlayers[sName] = {
         x: msg.x,
         y: msg.y,
         hp: msg.hp,
-        maxHp: msg.maxHp,
+        maxHp: msg.maxHp || 100,
         facingX: msg.facingX || 1,
         facingY: msg.facingY || 0,
         level: msg.level || 1,
@@ -1453,12 +1454,16 @@ function handleNetworkMessage(msg) {
           type: raw[5],
           color: raw[6] || "#ef4444",
           shape: raw[7] || "circle",
+          isBoss: !!raw[8],
+          name: raw[9] || "",
           hitFlash: 0,
           slowTimer: 0,
           bladeHitCd: 0,
           speed: 100,
           damage: 10,
         }));
+        const b = game.enemies.find((e) => e.isBoss);
+        game.activeBoss = b || null;
       }
       if (msg.time !== undefined) {
         game.time = msg.time;
@@ -2360,6 +2365,7 @@ function updateGame(dt) {
       game.lastSyncTime = now;
       network.send({
         type: "player_sync",
+        sender: appState.user?.username || (game.coopRole === "host" ? "Host" : "Guest"),
         x: Math.round(p.x),
         y: Math.round(p.y),
         hp: Math.round(p.hp),
@@ -2369,7 +2375,7 @@ function updateGame(dt) {
         level: p.level,
       });
 
-      // Если мы хост — отправляем снепшот врагов
+      // Если мы хост — отправляем снепшот врагов и босса
       if (game.coopRole === "host") {
         const enemyData = game.enemies.map((e) => [
           Math.round(e.x),
@@ -2380,6 +2386,8 @@ function updateGame(dt) {
           e.type,
           e.color,
           e.shape,
+          e.isBoss ? 1 : 0,
+          e.name || "",
         ]);
         network.send({
           type: "host_sync",
