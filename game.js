@@ -1146,9 +1146,11 @@ const network = {
     try {
       this.client = mqtt.connect(brokerUrl, {
         clientId: this.clientId,
+        protocolVersion: 4, // Форсируем MQTT 3.1.1 для избежания лимитов Receive Maximum в MQTT 5.0
         clean: true,
-        connectTimeout: 7000,
-        reconnectPeriod: 2500,
+        keepalive: 30,
+        connectTimeout: 8000,
+        reconnectPeriod: 2000,
       });
     } catch (e) {
       console.error("MQTT connect error:", e);
@@ -1250,8 +1252,12 @@ const network = {
         this.ws.send(JSON.stringify(data));
       }
     } else if (this.mode === "mqtt") {
-      if (this.client && this.client.connected && this.roomTopic) {
-        this.client.publish(this.roomTopic, JSON.stringify(data));
+      if (this.client && this.roomTopic) {
+        try {
+          this.client.publish(this.roomTopic, JSON.stringify(data), { qos: 0 });
+        } catch (e) {
+          console.warn("[Coop MQTT] Send failed:", e);
+        }
       }
     }
   },
@@ -1419,19 +1425,41 @@ function handleNetworkMessage(msg) {
   } else if (msg.type === "game_started") {
     startNewRun(true);
   } else if (msg.type === "coop_sync" || msg.type === "player_sync") {
-    // Позиция и статус напарника
+    // Позиция и статус напарника (с плавной интерполяцией)
     const sName = msg.sender || (msg.role === "host" ? "Host" : "Guest");
-    game.remotePlayers[sName] = {
-      x: msg.x || 0,
-      y: msg.y || 0,
-      hp: msg.hp !== undefined ? msg.hp : 100,
-      maxHp: msg.maxHp || 100,
-      facingX: msg.facingX || 1,
-      facingY: msg.facingY || 0,
-      level: msg.level || 1,
-      color: "#d946ef",
-      lastSeen: performance.now(),
-    };
+    const targetX = Number(msg.x) || 0;
+    const targetY = Number(msg.y) || 0;
+
+    let rp = game.remotePlayers[sName];
+    if (!rp) {
+      rp = {
+        x: targetX,
+        y: targetY,
+        targetX: targetX,
+        targetY: targetY,
+        hp: msg.hp !== undefined ? msg.hp : 100,
+        maxHp: msg.maxHp || 100,
+        facingX: msg.facingX || 1,
+        facingY: msg.facingY || 0,
+        level: msg.level || 1,
+        color: "#d946ef",
+        lastSeen: performance.now(),
+      };
+      game.remotePlayers[sName] = rp;
+    } else {
+      rp.targetX = targetX;
+      rp.targetY = targetY;
+      if (rp.x === 0 && rp.y === 0 && (targetX !== 0 || targetY !== 0)) {
+        rp.x = targetX;
+        rp.y = targetY;
+      }
+      rp.hp = msg.hp !== undefined ? msg.hp : rp.hp;
+      rp.maxHp = msg.maxHp || rp.maxHp;
+      rp.facingX = msg.facingX || rp.facingX;
+      rp.facingY = msg.facingY || rp.facingY;
+      rp.level = msg.level || rp.level;
+      rp.lastSeen = performance.now();
+    }
 
     // Если мы гость — синхронизируем состояние арены от хоста
     if (game.coopRole === "guest" && game.running) {
@@ -2448,10 +2476,21 @@ function updateGame(dt) {
   }
   if (!inModal) { updateWeapons(dt); }
 
+  // Плавная интерполяция движения напарников между сетевыми пакетами
+  if (game.isCoop) {
+    Object.values(game.remotePlayers).forEach((rp) => {
+      if (rp && rp.targetX !== undefined && rp.targetY !== undefined) {
+        rp.x += (rp.targetX - rp.x) * Math.min(1, dt * 12);
+        rp.y += (rp.targetY - rp.y) * Math.min(1, dt * 12);
+      }
+    });
+  }
+
+
   // Сетевая синхронизация кооператива (10 раз в секунду: 100 мс)
   if (game.isCoop) {
     const now = performance.now();
-    if (now - game.lastSyncTime > 100) {
+    if (now - game.lastSyncTime > 220) {
       game.lastSyncTime = now;
       const myName = appState.user?.username || (game.coopRole === "host" ? "Host" : "Guest");
       const syncPacket = {
