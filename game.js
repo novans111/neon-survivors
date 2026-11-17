@@ -1188,6 +1188,7 @@ const network = {
     game.coopRoom = code;
     game.coopRole = "host";
     game.coopPlayers = [username];
+    this.peerConns = {};
     updateCoopLobbyUI();
 
     if (this.peer) {
@@ -1197,17 +1198,19 @@ const network = {
     }
 
     this.peer = new Peer(peerRoomId, {
+      debug: 2,
       config: {
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun2.l.google.com:19302" },
         ],
       },
     });
 
-    this.peer.on("open", () => {
+    this.peer.on("open", (id) => {
       this.connected = true;
-      console.log("[P2P] Room opened on PeerJS broker with ID:", peerRoomId);
+      console.log("[P2P Host] Opened broker connection with ID:", id);
       handleNetworkMessage({
         type: "room_created",
         room: code,
@@ -1217,6 +1220,7 @@ const network = {
     });
 
     this.peer.on("connection", (conn) => {
+      console.log("[P2P Host] Incoming guest connection:", conn.peer);
       this.setupPeerConn(conn);
       conn.on("data", (raw) => {
         const msg = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -1225,7 +1229,9 @@ const network = {
           conn.remoteUsername = guestName;
           const allPlayers = [username];
           Object.values(this.peerConns).forEach((c) => {
-            if (c.remoteUsername) allPlayers.push(c.remoteUsername);
+            if (c.remoteUsername && !allPlayers.includes(c.remoteUsername)) {
+              allPlayers.push(c.remoteUsername);
+            }
           });
           conn.send({
             type: "room_joined",
@@ -1248,10 +1254,11 @@ const network = {
     });
 
     this.peer.on("error", (err) => {
+      console.warn("PeerJS Host Error:", err);
       if (err.type === "unavailable-id") {
         this.createRoomP2P(username);
       } else {
-        console.warn("PeerJS room error:", err);
+        alert("Ошибка создания комнаты: " + (err.message || err.type));
       }
     });
   },
@@ -1262,35 +1269,53 @@ const network = {
     game.coopRoom = code.trim();
     game.coopRole = "guest";
     game.coopPlayers = [username];
+    this.peerConns = {};
     updateCoopLobbyUI();
 
-    if (!this.peer || this.peer.destroyed) {
-      this.peer = new Peer({
-        config: {
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" },
-          ],
-        },
-      });
+    if (this.peer) {
+      try {
+        this.peer.destroy();
+      } catch (_) {}
     }
 
+    this.peer = new Peer({
+      debug: 2,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun2.l.google.com:19302" },
+        ],
+      },
+    });
+
     const connectToHost = () => {
+      console.log("[P2P Guest] Connecting to host:", peerRoomId);
       const conn = this.peer.connect(peerRoomId, { reliable: true });
       this.setupPeerConn(conn);
       conn.on("open", () => {
+        console.log("[P2P Guest] Connected to host! Sending join_room...");
         conn.send({ type: "join_room", username: username, room: code.trim() });
       });
       conn.on("error", (err) => {
-        console.warn("Connection to host error:", err);
+        console.warn("Guest connection error:", err);
+        alert("Не удалось подключиться к комнате #" + code + " (проверьте правильность кода или подождите 2-3 секунды)");
       });
     };
 
-    if (this.peer.open) {
+    this.peer.on("open", (id) => {
+      console.log("[P2P Guest] Broker opened, our ID:", id);
       connectToHost();
-    } else {
-      this.peer.on("open", connectToHost);
-    }
+    });
+
+    this.peer.on("error", (err) => {
+      console.warn("PeerJS Guest Error:", err);
+      if (err.type === "peer-unavailable") {
+        alert("Комната #" + code + " не найдена! Убедитесь, что создатель лобби находится в меню.");
+      } else {
+        alert("Ошибка сети P2P: " + (err.message || err.type));
+      }
+    });
   },
 
   broadcastP2P(data) {
