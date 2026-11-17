@@ -1058,6 +1058,7 @@ const game = {
   coopPlayers: [],
   remotePlayers: {}, // username -> { x, y, hp, maxHp, facingX, facingY, level, weapons, passives }
   lastSyncTime: 0,
+  nextEnemyId: 0,
 };
 
 // Менеджер сетевого взаимодействия (Универсальный MQTT WebSocket брокер + локальный WS)
@@ -1067,9 +1068,10 @@ const network = {
   connected: false,
   mode: "mqtt", // "mqtt" or "ws"
   roomTopic: null,
+  clientId: null,
 
   isGitHubPages() {
-    return window.location.hostname.endsWith("github.io");
+    return window.location.hostname.endsWith("github.io") || window.location.protocol === "https:";
   },
 
   connect(onReady) {
@@ -1136,15 +1138,17 @@ const network = {
       return;
     }
 
-    const clientId = "neon_" + (appState.user?.username || "p") + "_" + Math.random().toString(16).slice(2, 8);
+    if (!this.clientId) {
+      this.clientId = "neon_" + (appState.user?.username || ("p" + Math.floor(1000 + Math.random() * 9000))) + "_" + Math.random().toString(16).slice(2, 8);
+    }
     const brokerUrl = "wss://broker.emqx.io:8084/mqtt";
 
     try {
       this.client = mqtt.connect(brokerUrl, {
-        clientId: clientId,
+        clientId: this.clientId,
         clean: true,
-        connectTimeout: 5000,
-        reconnectPeriod: 2000,
+        connectTimeout: 7000,
+        reconnectPeriod: 2500,
       });
     } catch (e) {
       console.error("MQTT connect error:", e);
@@ -1154,14 +1158,20 @@ const network = {
     this.client.on("connect", () => {
       this.connected = true;
       console.log("[Coop MQTT] Connected to cloud broker wss://broker.emqx.io:8084/mqtt");
+      // Автоматическая повторная подписка на тему комнаты при reconnect
+      if (this.roomTopic) {
+        this.client.subscribe(this.roomTopic, (err) => {
+          if (!err) console.log("[Coop MQTT] Subscribed/Resubscribed to:", this.roomTopic);
+        });
+      }
       if (onReady) onReady();
     });
 
     this.client.on("message", (topic, payload) => {
       try {
         const msg = JSON.parse(payload.toString());
-        // Игнорируем собственные эхо-сообщения
-        if (msg.senderClient === clientId) return;
+        // Игнорируем собственные сообщения
+        if (msg.senderClient === this.clientId) return;
         handleNetworkMessage(msg);
       } catch (e) {
         console.error("MQTT message parse error:", e);
@@ -1233,13 +1243,14 @@ const network = {
   },
 
   send(data) {
+    if (!data) return;
+    data.senderClient = this.clientId;
     if (this.mode === "ws") {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify(data));
       }
     } else if (this.mode === "mqtt") {
       if (this.client && this.client.connected && this.roomTopic) {
-        data.senderClient = this.client.options.clientId;
         this.client.publish(this.roomTopic, JSON.stringify(data));
       }
     }
@@ -1313,6 +1324,8 @@ function startNewRun(isCoop = false) {
   game.spawnTimer = 0.5;
   game.bossTimer = 45; // Первый босс на 00:45
   game.activeBoss = null;
+  game.nextEnemyId = 0;
+  game.lastSyncTime = 0;
 
   game.player = createPlayer(game.starterWeapon);
   game.enemies = [];
@@ -1358,6 +1371,8 @@ function startNewRun(isCoop = false) {
 
 // Сетевые обработчики сообщений
 function handleNetworkMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+
   if (msg.type === "room_created") {
     game.coopRoom = msg.room;
     game.coopRole = "host";
@@ -1366,10 +1381,9 @@ function handleNetworkMessage(msg) {
   } else if (msg.type === "room_joined") {
     game.coopRoom = msg.room;
     game.coopRole = "guest";
-    game.coopPlayers = msg.players || [];
+    game.coopPlayers = msg.players || [appState.user?.username || "Guest"];
     updateCoopLobbyUI();
   } else if (msg.type === "guest_hello") {
-    // Гость подключился к комнате через MQTT
     if (game.coopRole === "host") {
       const gName = msg.username || "Guest";
       if (!game.coopPlayers.includes(gName)) {
@@ -1377,7 +1391,6 @@ function handleNetworkMessage(msg) {
       }
       updateCoopLobbyUI();
       sfx.coin();
-      // Отправляем гостю подтверждение со списком всех игроков
       network.send({
         type: "host_welcome",
         host: appState.user?.username || "Host",
@@ -1405,30 +1418,111 @@ function handleNetworkMessage(msg) {
     leaveCoopLobby();
   } else if (msg.type === "game_started") {
     startNewRun(true);
-  } else if (msg.type === "player_sync") {
-    // Состояние напарника
-    const sName = msg.sender || (game.coopRole === "host" ? "Guest" : "Host");
-    if (sName !== (appState.user?.username || "")) {
-      game.remotePlayers[sName] = {
-        x: msg.x,
-        y: msg.y,
-        hp: msg.hp,
-        maxHp: msg.maxHp || 100,
-        facingX: msg.facingX || 1,
-        facingY: msg.facingY || 0,
-        level: msg.level || 1,
-        color: "#d946ef",
-        lastSeen: performance.now(),
-      };
-    }
-  } else if (msg.type === "combat_event") {
-    // Урон по мобам от напарника (если мы хост — наносим урон мобу)
-    if (game.coopRole === "host" && msg.enemyIndex !== undefined) {
-      const e = game.enemies[msg.enemyIndex];
-      if (e) {
-        damageEnemy(e, msg.damage, msg.srcX || e.x, msg.srcY || e.y, msg.knockback || 80);
+  } else if (msg.type === "coop_sync" || msg.type === "player_sync") {
+    // Позиция и статус напарника
+    const sName = msg.sender || (msg.role === "host" ? "Host" : "Guest");
+    game.remotePlayers[sName] = {
+      x: msg.x || 0,
+      y: msg.y || 0,
+      hp: msg.hp !== undefined ? msg.hp : 100,
+      maxHp: msg.maxHp || 100,
+      facingX: msg.facingX || 1,
+      facingY: msg.facingY || 0,
+      level: msg.level || 1,
+      color: "#d946ef",
+      lastSeen: performance.now(),
+    };
+
+    // Если мы гость — синхронизируем состояние арены от хоста
+    if (game.coopRole === "guest" && game.running) {
+      if (msg.time !== undefined) {
+        game.time = msg.time;
+      }
+      if (msg.kills !== undefined && msg.kills > game.kills) {
+        game.kills = msg.kills;
+      }
+      if (Array.isArray(msg.enemies)) {
+        const typeNames = ["ghoul", "swarmer", "brute", "phantom", "boss"];
+        const typeConfigs = {
+          swarmer: { radius: 11, speed: 145, damage: 7, xp: 2, color: "#d946ef", shape: "diamond" },
+          ghoul: { radius: 15, speed: 105, damage: 11, xp: 3, color: "#ef4444", shape: "circle" },
+          brute: { radius: 23, speed: 74, damage: 18, xp: 10, color: "#f97316", shape: "hex" },
+          phantom: { radius: 15, speed: 92, damage: 12, xp: 6, color: "#38bdf8", shape: "triangle" },
+          boss: { radius: 36, speed: 88, damage: 26, xp: 65, color: "#ff2a85", shape: "boss" },
+        };
+
+        const existingMap = new Map();
+        for (const e of game.enemies) {
+          if (e.id !== undefined) existingMap.set(e.id, e);
+        }
+
+        const updatedEnemies = [];
+        for (const raw of msg.enemies) {
+          const [id, ex, ey, ehp, tIdx, isBoss, eMaxHp, eName] = raw;
+          const tName = typeNames[tIdx] || "ghoul";
+          const cfg = typeConfigs[tName] || typeConfigs.ghoul;
+
+          let e = existingMap.get(id);
+          if (e) {
+            e.x = ex;
+            e.y = ey;
+            e.hp = ehp;
+            if (eMaxHp) e.maxHp = eMaxHp;
+            updatedEnemies.push(e);
+          } else {
+            e = {
+              id: id,
+              x: ex,
+              y: ey,
+              vx: 0,
+              vy: 0,
+              radius: cfg.radius,
+              hp: ehp,
+              maxHp: eMaxHp || ehp,
+              type: tName,
+              color: cfg.color,
+              shape: cfg.shape,
+              isBoss: !!isBoss,
+              name: eName || (isBoss ? "БОСС" : ""),
+              speed: cfg.speed,
+              damage: cfg.damage,
+              xp: cfg.xp, // Гарантированное число опыта!
+              hitFlash: 0,
+              slowTimer: 0,
+              bladeHitCd: 0,
+              shootTimer: 2.2,
+            };
+            updatedEnemies.push(e);
+          }
+        }
+        game.enemies = updatedEnemies;
+        if (msg.boss) {
+          game.activeBoss = game.enemies.find((e) => e.id === msg.boss.id) || null;
+        } else {
+          game.activeBoss = null;
+        }
       }
     }
+  } else if (msg.type === "enemy_hit") {
+    // Гость нанес урон мобу — хост применяет его к своей симуляции
+    if (game.coopRole === "host" && msg.id !== undefined) {
+      const e = game.enemies.find((x) => x.id === msg.id);
+      if (e) {
+        damageEnemy(e, msg.damage || 10, e.x, e.y, 70, true);
+      }
+    }
+  } else if (msg.type === "team_pickup") {
+    // Общий опыт и золото для всей команды!
+    if (msg.kind === "xp" && msg.value) {
+      gainXp(msg.value, true);
+    } else if (msg.kind === "gold" && msg.value) {
+      game.gold += msg.value;
+      sfx.coin();
+      if (game.player) {
+        addFloatingText(game.player.x, game.player.y - 24, `+${msg.value} 🪙 (Напарник)`, "#ffd166", 15);
+      }
+    }
+  } else if (msg.type === "combat_fx") {
     if (msg.fx === "slash") {
       game.slashes.push({
         x: msg.x,
@@ -1441,36 +1535,9 @@ function handleNetworkMessage(msg) {
     } else if (msg.fx === "lightning" && msg.points) {
       game.lightningArcs.push({ points: msg.points, life: 0.18, maxLife: 0.18 });
     }
-  } else if (msg.type === "host_sync") {
-    // Синхронизация мобов от хоста гостям
-    if (game.coopRole === "guest" && game.running) {
-      if (Array.isArray(msg.enemies)) {
-        game.enemies = msg.enemies.map((raw) => ({
-          x: raw[0],
-          y: raw[1],
-          radius: raw[2],
-          hp: raw[3],
-          maxHp: raw[4],
-          type: raw[5],
-          color: raw[6] || "#ef4444",
-          shape: raw[7] || "circle",
-          isBoss: !!raw[8],
-          name: raw[9] || "",
-          hitFlash: 0,
-          slowTimer: 0,
-          bladeHitCd: 0,
-          speed: 100,
-          damage: 10,
-        }));
-        const b = game.enemies.find((e) => e.isBoss);
-        game.activeBoss = b || null;
-      }
-      if (msg.time !== undefined) {
-        game.time = msg.time;
-      }
-      if (msg.kills !== undefined) {
-        game.kills = msg.kills;
-      }
+  } else if (msg.type === "player_died") {
+    if (game.player) {
+      addFloatingText(game.player.x, game.player.y - 40, "⚠ НАПАРНИК ПАЛ В БОЮ!", "#ef4444", 20);
     }
   } else if (msg.type === "error") {
     alert(msg.message || "Ошибка подключения к комнате");
@@ -1604,6 +1671,7 @@ function spawnEnemyAroundPlayer(type, customAngle = null, customDist = null) {
 
   const tpl = templates[type] || templates.ghoul;
   const enemy = {
+    id: ++game.nextEnemyId,
     x,
     y,
     vx: 0,
@@ -1850,7 +1918,7 @@ function updateWeapons(dt) {
   }
 }
 
-function damageEnemy(enemy, amount, srcX, srcY, knockback = 80) {
+function damageEnemy(enemy, amount, srcX, srcY, knockback = 80, fromNetwork = false) {
   const isCrit = Math.random() < 0.12;
   const finalDmg = isCrit ? Math.round(amount * 1.6) : amount;
   enemy.hp -= finalDmg;
@@ -1868,6 +1936,15 @@ function damageEnemy(enemy, amount, srcX, srcY, knockback = 80) {
     isCrit ? "#ffd166" : "#ffffff",
     isCrit ? 16 : 13
   );
+
+  // Если урон нанес гость локально — передаем урон хосту по ID врага
+  if (game.isCoop && game.coopRole === "guest" && !fromNetwork && enemy.id) {
+    network.send({
+      type: "enemy_hit",
+      id: enemy.id,
+      damage: finalDmg,
+    });
+  }
 }
 
 function spawnParticles(x, y, color, count = 8) {
@@ -2133,8 +2210,10 @@ function pickQuizQuestion() {
   return { question: item.q, options };
 }
 
-function gainXp(amount) {
+function gainXp(amount, fromNetwork = false) {
+  if (!amount || isNaN(amount) || amount <= 0) return;
   const p = game.player;
+  if (!p) return;
   p.xp += amount;
   sfx.gem();
   if (p.xp >= p.xpToNext && !game.choosingUpgrade) {
@@ -2310,7 +2389,16 @@ function applyUpgradeChoice(ch) {
 // ОБНОВЛЕНИЕ ФИЗИКИ И СОСТОЯНИЯ ИГРЫ
 // ============================================================================
 function updateGame(dt) {
-  if (!game.running || game.paused || game.choosingUpgrade || game.over || game.deathSlotActive) return;
+  if (!game.running || game.paused || game.over) return;
+
+  const inModal = game.choosingUpgrade || game.deathSlotActive;
+  // В одиночной игре при модалках полностью останавливаем физику
+  if (inModal && !game.isCoop) return;
+
+  // В коопе при выборе апгрейда или слот-машине даем временный щит, но игра продолжается
+  if (inModal && game.isCoop && game.player) {
+    game.player.invulnTimer = Math.max(game.player.invulnTimer, 2.5);
+  }
 
   game.time += dt;
   const p = game.player;
@@ -2323,49 +2411,53 @@ function updateGame(dt) {
   if (p.invulnTimer > 0) p.invulnTimer -= dt;
   if (game.shakeTime > 0) game.shakeTime -= dt;
 
-  // Движение игрока (WASD / стрелки или мышь)
+  // Движение игрока (только если не в модалке выбора улучшения)
   let mx = 0;
   let my = 0;
-  if (input.keys["KeyW"] || input.keys["ArrowUp"]) my -= 1;
-  if (input.keys["KeyS"] || input.keys["ArrowDown"]) my += 1;
-  if (input.keys["KeyA"] || input.keys["ArrowLeft"]) mx -= 1;
-  if (input.keys["KeyD"] || input.keys["ArrowRight"]) mx += 1;
+  if (!inModal) {
+    if (input.keys["KeyW"] || input.keys["ArrowUp"]) my -= 1;
+    if (input.keys["KeyS"] || input.keys["ArrowDown"]) my += 1;
+    if (input.keys["KeyA"] || input.keys["ArrowLeft"]) mx -= 1;
+    if (input.keys["KeyD"] || input.keys["ArrowRight"]) mx += 1;
 
-  if (mx === 0 && my === 0 && input.mouseDown) {
-    const dx = input.mouseX - canvas.width / 2;
-    const dy = input.mouseY - canvas.height / 2;
-    const dist = Math.hypot(dx, dy);
-    if (dist > 12) {
-      mx = dx / dist;
-      my = dy / dist;
+    if (input.mouseDown) {
+      const dx = input.mouseX - canvas.width / 2;
+      const dy = input.mouseY - canvas.height / 2;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 18) {
+        mx = dx / dist;
+        my = dy / dist;
+      }
+    } else if (mx !== 0 || my !== 0) {
+      const len = Math.hypot(mx, my);
+      mx /= len;
+      my /= len;
     }
-  } else if (mx !== 0 || my !== 0) {
-    const len = Math.hypot(mx, my);
-    mx /= len;
-    my /= len;
-  }
 
-  if (mx !== 0 || my !== 0) {
-    p.x += mx * stats.moveSpeed * dt;
-    p.y += my * stats.moveSpeed * dt;
-    p.facingX = mx;
-    p.facingY = my;
+    if (mx !== 0 || my !== 0) {
+      p.x += mx * stats.moveSpeed * dt;
+      p.y += my * stats.moveSpeed * dt;
+      p.facingX = mx;
+      p.facingY = my;
+    }
   }
 
   // Спавн волн и работа оружия
   if (!game.isCoop || game.coopRole === "host") {
     updateWaveDirector(dt);
   }
-  updateWeapons(dt);
+  if (!inModal) { updateWeapons(dt); }
 
-  // Сетевая синхронизация кооператива (15 раз в секунду)
+  // Сетевая синхронизация кооператива (10 раз в секунду: 100 мс)
   if (game.isCoop) {
     const now = performance.now();
-    if (now - game.lastSyncTime > 65) {
+    if (now - game.lastSyncTime > 100) {
       game.lastSyncTime = now;
-      network.send({
-        type: "player_sync",
-        sender: appState.user?.username || (game.coopRole === "host" ? "Host" : "Guest"),
+      const myName = appState.user?.username || (game.coopRole === "host" ? "Host" : "Guest");
+      const syncPacket = {
+        type: "coop_sync",
+        sender: myName,
+        role: game.coopRole,
         x: Math.round(p.x),
         y: Math.round(p.y),
         hp: Math.round(p.hp),
@@ -2373,29 +2465,34 @@ function updateGame(dt) {
         facingX: p.facingX,
         facingY: p.facingY,
         level: p.level,
-      });
+        score: game.score,
+        kills: game.kills,
+      };
 
-      // Если мы хост — отправляем снепшот врагов и босса
       if (game.coopRole === "host") {
-        const enemyData = game.enemies.map((e) => [
+        syncPacket.time = Math.round(game.time * 10) / 10;
+        syncPacket.kills = game.kills;
+        const typeMap = { ghoul: 0, swarmer: 1, brute: 2, phantom: 3, boss: 4 };
+        syncPacket.enemies = game.enemies.map((e) => [
+          e.id || 0,
           Math.round(e.x),
           Math.round(e.y),
-          e.radius,
           Math.round(e.hp),
-          e.maxHp,
-          e.type,
-          e.color,
-          e.shape,
+          typeMap[e.type] !== undefined ? typeMap[e.type] : 0,
           e.isBoss ? 1 : 0,
+          e.maxHp,
           e.name || "",
         ]);
-        network.send({
-          type: "host_sync",
-          time: game.time,
-          kills: game.kills,
-          enemies: enemyData,
-        });
+        if (game.activeBoss) {
+          syncPacket.boss = {
+            id: game.activeBoss.id,
+            name: game.activeBoss.name,
+            hp: Math.round(game.activeBoss.hp),
+            maxHp: game.activeBoss.maxHp,
+          };
+        }
       }
+      network.send(syncPacket);
     }
   }
 
@@ -2538,10 +2635,16 @@ function updateGame(dt) {
     if (dist <= p.radius + 12) {
       if (g.kind === "xp") {
         gainXp(g.value);
+        if (game.isCoop) {
+          network.send({ type: "team_pickup", kind: "xp", value: g.value });
+        }
       } else if (g.kind === "gold") {
         game.gold += g.value;
         sfx.coin();
         addFloatingText(p.x, p.y - 24, `+${g.value} 🪙`, "#ffd166", 15);
+        if (game.isCoop) {
+          network.send({ type: "team_pickup", kind: "gold", value: g.value });
+        }
       } else if (g.kind === "heal") {
         p.hp = Math.min(p.maxHp, p.hp + g.value);
         sfx.coin();
@@ -3704,6 +3807,54 @@ function renderGame() {
   ctx.globalAlpha = 1;
 
   ctx.restore();
+  // 9.2. УКАЗАТЕЛЬ НА НАПАРНИКА, ЕСЛИ ОН ВНЕ ЭКРАНА
+  if (game.isCoop) {
+    Object.keys(game.remotePlayers).forEach((uname) => {
+      const rp = game.remotePlayers[uname];
+      if (!rp) return;
+
+      const screenX = camX + rp.x;
+      const screenY = camY + rp.y;
+      const margin = 48;
+      const isOffScreen =
+        screenX < margin || screenX > canvas.width - margin ||
+        screenY < margin || screenY > canvas.height - margin;
+
+      if (isOffScreen) {
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const angle = Math.atan2(screenY - centerY, screenX - centerX);
+        const distM = Math.round(Math.hypot(rp.x - p.x, rp.y - p.y) / 20);
+
+        const edgeX = Math.max(margin, Math.min(canvas.width - margin, centerX + Math.cos(angle) * (canvas.width / 2 - margin)));
+        const edgeY = Math.max(margin, Math.min(canvas.height - margin, centerY + Math.sin(angle) * (canvas.height / 2 - margin)));
+
+        ctx.save();
+        ctx.translate(edgeX, edgeY);
+        ctx.rotate(angle);
+
+        ctx.fillStyle = "#d946ef";
+        ctx.beginPath();
+        ctx.moveTo(14, 0);
+        ctx.lineTo(-8, -8);
+        ctx.lineTo(-4, 0);
+        ctx.lineTo(-8, 8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
+        ctx.font = "bold 11px system-ui, sans-serif";
+        ctx.fillStyle = "#fbcfe8";
+        ctx.textAlign = "center";
+        ctx.shadowColor = "#d946ef";
+        ctx.shadowBlur = 6;
+        ctx.fillText(`👥 ${uname} (${distM}м)`, edgeX, edgeY + 18);
+        ctx.restore();
+      }
+    });
+  }
+
 
 
 }
