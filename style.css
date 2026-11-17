@@ -1174,3 +1174,140 @@ body, html {
   100% { transform: scale(1.03); filter: brightness(1.25); }
 }
 
+/* ============================================================================
+ * CO-OP MULTIPLAYER STYLES
+ * ============================================================================ */
+.coop-panel {
+  margin-top: 12px;
+  background: rgba(14, 20, 48, 0.7);
+  border: 1px solid rgba(181, 55, 242, 0.4);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.coop-title {
+  font-size: 0.88rem;
+  font-weight: 800;
+  color: #d946ef;
+  letter-spacing: 0.5px;
+}
+
+.coop-actions-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.coop-action-btn {
+  font-size: 0.82rem;
+  padding: 7px 11px;
+}
+
+.coop-join-box {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+}
+
+.coop-join-box input {
+  flex: 1;
+  min-width: 90px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(6, 9, 20, 0.85);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 700;
+  outline: none;
+}
+
+.coop-join-box input:focus {
+  border-color: #d946ef;
+}
+
+.coop-status-box {
+  background: rgba(6, 9, 24, 0.85);
+  border: 1px dashed rgba(0, 242, 254, 0.5);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.coop-lobby-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.86rem;
+  color: var(--neon-cyan);
+}
+
+.icon-small-btn {
+  background: transparent;
+  border: none;
+  color: #ef4444;
+  cursor: pointer;
+  font-size: 0.95rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.icon-small-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.coop-players-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.82rem;
+}
+
+.coop-player-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.coop-player-tag.host {
+  border-left: 3px solid #ffd166;
+}
+
+.coop-player-tag.guest {
+  border-left: 3px solid #00f2fe;
+}
+
+.start-coop-btn {
+  padding: 10px;
+  font-size: 0.95rem;
+  background: linear-gradient(135deg, #b537f2, #ff2a85);
+}
+
+.coop-hint-msg {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-align: center;
+  font-style: italic;
+}
+
+.coop-hud-badge {
+  display: inline-block;
+  background: linear-gradient(90deg, #b537f2, #ff2a85);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 900;
+  padding: 2px 8px;
+  border-radius: 99px;
+  letter-spacing: 1px;
+  margin-top: 2px;
+}
+
+

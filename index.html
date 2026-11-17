@@ -28,6 +28,7 @@
       <div class="hud-center">
         <div id="hudTimer" class="hud-timer">00:00</div>
         <div id="waveBanner" class="wave-banner">Волна 1</div>
+        <div id="hudCoopBadge" class="coop-hud-badge hidden">👥 КООПЕРАТИВ</div>
       </div>
 
       <div class="hud-right">
@@ -105,6 +106,28 @@
           </div>
 
           <button id="btnStartRun" class="primary-btn start-run-btn">⚔ НАЧАТЬ ЗАБЕГ</button>
+
+          <!-- КООПЕРАТИВНЫЙ РЕЖИМ (LOBBY) -->
+          <div class="coop-panel">
+            <div class="coop-title">👥 Кооператив онлайн (2-4 игрока)</div>
+            <div class="coop-actions-row">
+              <button id="btnCreateCoopRoom" class="secondary-btn coop-action-btn">👑 Создать лобби</button>
+              <div class="coop-join-box">
+                <input type="text" id="inputCoopCode" placeholder="Код (напр. 4821)" maxlength="6" />
+                <button id="btnJoinCoopRoom" class="secondary-btn coop-action-btn">🔗 Войти</button>
+              </div>
+            </div>
+            <div id="coopLobbyStatus" class="coop-status-box hidden">
+              <div class="coop-lobby-header">
+                <span>Комната: <strong id="coopRoomCodeDisplay">#----</strong></span>
+                <button id="btnLeaveCoopRoom" class="icon-small-btn" title="Покинуть лобби">✖</button>
+              </div>
+              <div class="coop-players-list" id="coopPlayersListDisplay"></div>
+              <button id="btnStartCoopGame" class="primary-btn start-coop-btn hidden">🚀 ЗАПУСТИТЬ КООП-ИГРУ!</button>
+              <div id="coopGuestWaitingMsg" class="coop-hint-msg hidden">Ожидание запуска игры хостом...</div>
+            </div>
+          </div>
+
           <p class="controls-hint">Управление: <b>WASD / Стрелки</b> или <b>Мышь (зажать ЛКМ)</b> • Пауза: <b>ESC / P</b></p>
         </section>
 
@@ -261,6 +284,7 @@
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="./game.js"></script>
 </body>
 </html>

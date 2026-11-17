@@ -6,12 +6,16 @@ for zero external dependencies.
 """
 
 import atexit
+import base64
 import hashlib
 import hmac
 import json
 import os
+import random
 import secrets
+import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import threading
@@ -319,6 +323,242 @@ def build_user_profile(conn: sqlite3.Connection, user_row: sqlite3.Row) -> dict:
     }
 
 
+# ============================================================================
+# WEBSOCKET CO-OP LOBBY & RELAY (RFC 6455)
+# ============================================================================
+WS_MAGIC = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+class WsConnection:
+    def __init__(self, sock):
+        self.sock = sock
+        self.lock = threading.Lock()
+        self.closed = False
+        self.room_code = None
+        self.username = "Unknown"
+        self.role = "guest"  # "host" or "guest"
+
+    def send_json(self, data: dict):
+        if self.closed:
+            return
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        length = len(payload)
+        if length <= 125:
+            header = bytes([0x81, length])
+        elif length <= 65535:
+            header = bytes([0x81, 126]) + struct.pack(">H", length)
+        else:
+            header = bytes([0x81, 127]) + struct.pack(">Q", length)
+        with self.lock:
+            try:
+                self.sock.sendall(header + payload)
+            except Exception:
+                self.closed = True
+
+    def read_frame(self):
+        try:
+            b1_b2 = self.sock.recv(2)
+            if len(b1_b2) < 2:
+                return None, None
+            b1, b2 = b1_b2
+            opcode = b1 & 0x0F
+            is_masked = (b2 & 0x80) != 0
+            payload_len = b2 & 0x7F
+            if payload_len == 126:
+                ext = self.sock.recv(2)
+                if len(ext) < 2:
+                    return None, None
+                payload_len = struct.unpack(">H", ext)[0]
+            elif payload_len == 127:
+                ext = self.sock.recv(8)
+                if len(ext) < 8:
+                    return None, None
+                payload_len = struct.unpack(">Q", ext)[0]
+
+            mask = self.sock.recv(4) if is_masked else None
+            chunks = []
+            received = 0
+            while received < payload_len:
+                chunk = self.sock.recv(min(payload_len - received, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                received += len(chunk)
+            payload = b"".join(chunks)
+            if is_masked and mask:
+                payload = bytes([b ^ mask[i % 4] for i, b in enumerate(payload)])
+            return opcode, payload
+        except Exception:
+            return None, None
+
+    def close(self):
+        self.closed = True
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+class RoomManager:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.rooms = {}  # code -> {"host": WsConnection, "guests": [WsConnection], "state": "lobby"|"playing"}
+
+    def create_room(self, host_ws: WsConnection, username: str) -> str:
+        with self.lock:
+            for _ in range(20):
+                code = f"{random.randint(1000, 9999)}"
+                if code not in self.rooms:
+                    break
+            host_ws.room_code = code
+            host_ws.username = username
+            host_ws.role = "host"
+            self.rooms[code] = {
+                "host": host_ws,
+                "guests": [],
+                "state": "lobby",
+                "created_at": time.time(),
+            }
+            return code
+
+    def join_room(self, guest_ws: WsConnection, code: str, username: str) -> dict:
+        with self.lock:
+            code = code.strip()
+            if code not in self.rooms:
+                return {"ok": False, "error": f"Комната #{code} не найдена"}
+            room = self.rooms[code]
+            if len(room["guests"]) >= 3:
+                return {"ok": False, "error": "Комната заполнена (макс. 4 игрока)"}
+            guest_ws.room_code = code
+            guest_ws.username = username
+            guest_ws.role = "guest"
+            room["guests"].append(guest_ws)
+            players = [room["host"].username] + [g.username for g in room["guests"]]
+            return {
+                "ok": True,
+                "host": room["host"].username,
+                "players": players,
+                "state": room["state"],
+            }
+
+    def get_room_clients(self, code: str):
+        with self.lock:
+            room = self.rooms.get(code)
+            if not room:
+                return []
+            return [room["host"]] + list(room["guests"])
+
+    def broadcast_to_room(self, code: str, data: dict, exclude: WsConnection = None):
+        clients = self.get_room_clients(code)
+        for client in clients:
+            if client != exclude and not client.closed:
+                client.send_json(data)
+
+    def remove_client(self, ws: WsConnection):
+        with self.lock:
+            code = ws.room_code
+            if not code or code not in self.rooms:
+                return
+            room = self.rooms[code]
+            if ws == room["host"]:
+                # Хост вышел — комната закрывается
+                self.broadcast_to_room(
+                    code,
+                    {"type": "room_closed", "reason": "Хост покинул комнату"},
+                    exclude=ws,
+                )
+                del self.rooms[code]
+            elif ws in room["guests"]:
+                room["guests"].remove(ws)
+                players = [room["host"].username] + [g.username for g in room["guests"]]
+                self.broadcast_to_room(
+                    code,
+                    {"type": "player_left", "username": ws.username, "players": players},
+                )
+
+
+room_manager = RoomManager()
+
+
+def handle_websocket_connection(sock, initial_ws_key: str):
+    accept_val = base64.b64encode(hashlib.sha1(initial_ws_key.encode("ascii") + WS_MAGIC).digest()).decode("ascii")
+    handshake = (
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Accept: {accept_val}\r\n\r\n"
+    )
+    sock.sendall(handshake.encode("ascii"))
+    client = WsConnection(sock)
+
+    try:
+        while not client.closed:
+            opcode, payload = client.read_frame()
+            if opcode is None or opcode == 0x08:  # Close frame
+                break
+            if opcode == 0x09:  # Ping
+                with client.lock:
+                    client.sock.sendall(bytes([0x8A, 0x00]))
+                continue
+            if opcode == 0x01:  # Text frame
+                try:
+                    msg = json.loads(payload.decode("utf-8"))
+                except Exception:
+                    continue
+
+                m_type = msg.get("type")
+
+                if m_type == "create_room":
+                    uname = str(msg.get("username", "Host"))[:20]
+                    code = room_manager.create_room(client, uname)
+                    client.send_json({
+                        "type": "room_created",
+                        "room": code,
+                        "host": uname,
+                        "players": [uname],
+                    })
+
+                elif m_type == "join_room":
+                    uname = str(msg.get("username", "Guest"))[:20]
+                    code = str(msg.get("room", "")).strip()
+                    res = room_manager.join_room(client, code, uname)
+                    if not res["ok"]:
+                        client.send_json({"type": "error", "message": res["error"]})
+                    else:
+                        client.send_json({
+                            "type": "room_joined",
+                            "room": code,
+                            "host": res["host"],
+                            "players": res["players"],
+                            "state": res["state"],
+                        })
+                        room_manager.broadcast_to_room(
+                            code,
+                            {"type": "player_joined", "username": uname, "players": res["players"]},
+                            exclude=client,
+                        )
+
+                elif m_type == "start_game":
+                    if client.role == "host" and client.room_code:
+                        with room_manager.lock:
+                            if client.room_code in room_manager.rooms:
+                                room_manager.rooms[client.room_code]["state"] = "playing"
+                        room_manager.broadcast_to_room(
+                            client.room_code,
+                            {"type": "game_started", "seed": random.randint(1000, 999999)},
+                        )
+
+                elif m_type in ("player_sync", "host_sync", "combat_event", "revive_event", "level_quiz"):
+                    # Ретрансляция игровых пакетов между участниками комнаты
+                    if client.room_code:
+                        msg["sender"] = client.username
+                        msg["role"] = client.role
+                        room_manager.broadcast_to_room(client.room_code, msg, exclude=client)
+
+    finally:
+        room_manager.remove_client(client)
+        client.close()
+
+
 class GameRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=STATIC_DIR, **kwargs)
@@ -375,6 +615,15 @@ class GameRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+
+        # Обработка WebSocket апгрейда (/ws)
+        if parsed.path == "/ws":
+            ws_key = self.headers.get("Sec-WebSocket-Key")
+            if ws_key:
+                self.close_connection = True
+                handle_websocket_connection(self.connection, ws_key)
+                return
+
         if parsed.path == "/api/me":
             with get_db() as conn:
                 user, _ = self.get_current_user(conn)

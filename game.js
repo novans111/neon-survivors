@@ -1050,6 +1050,250 @@ const game = {
   slashes: [],
   lightningArcs: [],
   props: [],
+
+  // Кооперативный режим
+  isCoop: false,
+  coopRole: "host", // "host" or "guest"
+  coopRoom: null,
+  coopPlayers: [],
+  remotePlayers: {}, // username -> { x, y, hp, maxHp, facingX, facingY, level, weapons, passives }
+  lastSyncTime: 0,
+};
+
+// Менеджер сетевого взаимодействия (Гибридный: WebSocket для Codespaces/VPS + WebRTC PeerJS для GitHub Pages)
+const network = {
+  ws: null,
+  peer: null,
+  peerConns: {}, // peerId/username -> DataConnection
+  connected: false,
+  mode: "ws", // "ws" or "p2p"
+
+  isGitHubPages() {
+    return window.location.hostname.endsWith("github.io");
+  },
+
+  connect() {
+    if (this.isGitHubPages()) {
+      this.initPeerJs();
+      return;
+    }
+    this.initWebSocket();
+  },
+
+  initWebSocket() {
+    this.mode = "ws";
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host || "localhost:8765";
+    const url = `${protocol}//${host}/ws`;
+
+    try {
+      this.ws = new WebSocket(url);
+    } catch (e) {
+      console.warn("WebSocket not supported, fallback to P2P:", e);
+      this.initPeerJs();
+      return;
+    }
+
+    this.ws.onopen = () => {
+      this.connected = true;
+      console.log("[Coop WS] Connected to Codespaces/Local relay server");
+    };
+
+    this.ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleNetworkMessage(msg);
+      } catch (err) {
+        console.error("WS Parse error:", err);
+      }
+    };
+
+    this.ws.onclose = () => {
+      this.connected = false;
+      console.log("[Coop WS] Disconnected");
+      if (game.isCoop && game.running) {
+        addFloatingText(game.player.x, game.player.y - 50, "⚠ СВЯЗЬ С СЕРВЕРОМ ПОТЕРЯНА", "#ef4444", 18);
+      }
+    };
+
+    this.ws.onerror = (err) => {
+      console.warn("[Coop WS] Error, trying P2P fallback:", err);
+      this.initPeerJs();
+    };
+  },
+
+  initPeerJs() {
+    this.mode = "p2p";
+    if (this.peer && !this.peer.destroyed) {
+      this.connected = true;
+      return;
+    }
+    if (typeof Peer === "undefined") {
+      console.warn("PeerJS library not loaded");
+      return;
+    }
+
+    this.peer = new Peer({
+      debug: 1,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+        ],
+      },
+    });
+
+    this.peer.on("open", (id) => {
+      this.connected = true;
+      console.log("[Coop P2P] PeerJS Ready, ID:", id);
+    });
+
+    this.peer.on("connection", (conn) => {
+      this.setupPeerConn(conn);
+    });
+
+    this.peer.on("error", (err) => {
+      console.warn("[Coop P2P] Error:", err);
+    });
+  },
+
+  setupPeerConn(conn) {
+    conn.on("open", () => {
+      this.peerConns[conn.peer] = conn;
+      console.log("[Coop P2P] Connection opened with:", conn.peer);
+    });
+
+    conn.on("data", (data) => {
+      try {
+        const msg = typeof data === "string" ? JSON.parse(data) : data;
+        handleNetworkMessage(msg);
+      } catch (e) {
+        console.error("P2P data parse error:", e);
+      }
+    });
+
+    conn.on("close", () => {
+      delete this.peerConns[conn.peer];
+      console.log("[Coop P2P] Connection closed with:", conn.peer);
+    });
+  },
+
+  createRoomP2P(username) {
+    const code = Math.floor(1000 + Math.random() * 9000).toString();
+    const peerRoomId = "neon-survivor-room-" + code;
+
+    if (this.peer) {
+      try {
+        this.peer.destroy();
+      } catch (_) {}
+    }
+
+    this.peer = new Peer(peerRoomId, {
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+        ],
+      },
+    });
+
+    this.peer.on("open", () => {
+      this.connected = true;
+      handleNetworkMessage({
+        type: "room_created",
+        room: code,
+        host: username,
+        players: [username],
+      });
+    });
+
+    this.peer.on("connection", (conn) => {
+      this.setupPeerConn(conn);
+      conn.on("data", (raw) => {
+        const msg = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (msg.type === "join_room") {
+          const guestName = msg.username || "Guest";
+          conn.remoteUsername = guestName;
+          const allPlayers = [username];
+          Object.values(this.peerConns).forEach((c) => {
+            if (c.remoteUsername) allPlayers.push(c.remoteUsername);
+          });
+          conn.send({
+            type: "room_joined",
+            room: code,
+            host: username,
+            players: allPlayers,
+          });
+          this.broadcastP2P({
+            type: "player_joined",
+            username: guestName,
+            players: allPlayers,
+          });
+        }
+      });
+    });
+
+    this.peer.on("error", (err) => {
+      if (err.type === "unavailable-id") {
+        this.createRoomP2P(username);
+      } else {
+        alert("Ошибка создания P2P комнаты: " + err.message);
+      }
+    });
+  },
+
+  joinRoomP2P(code, username) {
+    const peerRoomId = "neon-survivor-room-" + code.trim();
+    if (!this.peer || this.peer.destroyed) {
+      this.peer = new Peer({
+        config: {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" },
+          ],
+        },
+      });
+    }
+
+    const connectToHost = () => {
+      const conn = this.peer.connect(peerRoomId, { reliable: true });
+      this.setupPeerConn(conn);
+      conn.on("open", () => {
+        conn.send({ type: "join_room", username: username, room: code });
+      });
+      conn.on("error", (err) => {
+        alert("Не удалось подключиться к комнате #" + code + ": " + err.message);
+      });
+    };
+
+    if (this.peer.open) {
+      connectToHost();
+    } else {
+      this.peer.on("open", connectToHost);
+    }
+  },
+
+  broadcastP2P(data) {
+    const payload = JSON.stringify(data);
+    Object.values(this.peerConns).forEach((conn) => {
+      if (conn.open) {
+        conn.send(payload);
+      }
+    });
+  },
+
+  send(data) {
+    if (this.mode === "ws") {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(data));
+      }
+    } else if (this.mode === "p2p") {
+      this.broadcastP2P(data);
+    }
+  },
 };
 
 function createPlayer(starterWeapon) {
@@ -1103,8 +1347,9 @@ function getPlayerStats(p) {
   };
 }
 
-function startNewRun() {
+function startNewRun(isCoop = false) {
   sfx.init();
+  game.isCoop = isCoop;
   game.running = true;
   game.paused = false;
   game.choosingUpgrade = false;
@@ -1129,6 +1374,11 @@ function startNewRun() {
   game.slashes = [];
   game.lightningArcs = [];
 
+  const coopBadge = document.getElementById("hudCoopBadge");
+  if (coopBadge) {
+    coopBadge.classList.toggle("hidden", !isCoop);
+  }
+
   // Декоративные энергетические пилоны на арене
   game.props = [];
   for (let i = 0; i < 60; i++) {
@@ -1150,6 +1400,153 @@ function startNewRun() {
   game.resurrections = 0;
   showScreen("game");
   updateHud();
+
+  if (game.isCoop) {
+    addFloatingText(game.player.x, game.player.y - 40, "👥 КООПЕРАТИВНЫЙ ЗАБЕГ НАЧАТ!", "#d946ef", 20);
+  }
+}
+
+// Сетевые обработчики сообщений
+function handleNetworkMessage(msg) {
+  if (msg.type === "room_created") {
+    game.coopRoom = msg.room;
+    game.coopRole = "host";
+    game.coopPlayers = msg.players || [appState.user?.username || "Host"];
+    updateCoopLobbyUI();
+  } else if (msg.type === "room_joined") {
+    game.coopRoom = msg.room;
+    game.coopRole = "guest";
+    game.coopPlayers = msg.players || [];
+    updateCoopLobbyUI();
+  } else if (msg.type === "player_joined") {
+    game.coopPlayers = msg.players || [];
+    updateCoopLobbyUI();
+    sfx.coin();
+  } else if (msg.type === "player_left") {
+    game.coopPlayers = msg.players || [];
+    if (msg.username && game.remotePlayers[msg.username]) {
+      delete game.remotePlayers[msg.username];
+    }
+    updateCoopLobbyUI();
+  } else if (msg.type === "room_closed") {
+    alert(msg.reason || "Комната закрыта");
+    leaveCoopLobby();
+  } else if (msg.type === "game_started") {
+    startNewRun(true);
+  } else if (msg.type === "player_sync") {
+    // Состояние напарника
+    if (msg.sender && msg.sender !== (appState.user?.username || "")) {
+      game.remotePlayers[msg.sender] = {
+        x: msg.x,
+        y: msg.y,
+        hp: msg.hp,
+        maxHp: msg.maxHp,
+        facingX: msg.facingX || 1,
+        facingY: msg.facingY || 0,
+        level: msg.level || 1,
+        color: "#d946ef",
+        lastSeen: performance.now(),
+      };
+    }
+  } else if (msg.type === "combat_event") {
+    // Урон по мобам от напарника (если мы хост — наносим урон мобу)
+    if (game.coopRole === "host" && msg.enemyIndex !== undefined) {
+      const e = game.enemies[msg.enemyIndex];
+      if (e) {
+        damageEnemy(e, msg.damage, msg.srcX || e.x, msg.srcY || e.y, msg.knockback || 80);
+      }
+    }
+    if (msg.fx === "slash") {
+      game.slashes.push({
+        x: msg.x,
+        y: msg.y,
+        angle: msg.angle,
+        range: msg.range,
+        life: 0.2,
+        maxLife: 0.2,
+      });
+    } else if (msg.fx === "lightning" && msg.points) {
+      game.lightningArcs.push({ points: msg.points, life: 0.18, maxLife: 0.18 });
+    }
+  } else if (msg.type === "host_sync") {
+    // Синхронизация мобов от хоста гостям
+    if (game.coopRole === "guest" && game.running) {
+      if (Array.isArray(msg.enemies)) {
+        game.enemies = msg.enemies.map((raw) => ({
+          x: raw[0],
+          y: raw[1],
+          radius: raw[2],
+          hp: raw[3],
+          maxHp: raw[4],
+          type: raw[5],
+          color: raw[6] || "#ef4444",
+          shape: raw[7] || "circle",
+          hitFlash: 0,
+          slowTimer: 0,
+          bladeHitCd: 0,
+          speed: 100,
+          damage: 10,
+        }));
+      }
+      if (msg.time !== undefined) {
+        game.time = msg.time;
+      }
+      if (msg.kills !== undefined) {
+        game.kills = msg.kills;
+      }
+    }
+  } else if (msg.type === "error") {
+    alert(msg.message || "Ошибка подключения к комнате");
+  }
+}
+
+function updateCoopLobbyUI() {
+  const panel = document.getElementById("coopLobbyStatus");
+  const codeEl = document.getElementById("coopRoomCodeDisplay");
+  const listEl = document.getElementById("coopPlayersListDisplay");
+  const startBtn = document.getElementById("btnStartCoopGame");
+  const waitingMsg = document.getElementById("coopGuestWaitingMsg");
+
+  if (!panel || !codeEl || !listEl) return;
+
+  if (!game.coopRoom) {
+    panel.classList.add("hidden");
+    return;
+  }
+
+  panel.classList.remove("hidden");
+  codeEl.textContent = `#${game.coopRoom}`;
+
+  let html = "";
+  const myName = appState.user?.username || "";
+  game.coopPlayers.forEach((p, idx) => {
+    const isHost = idx === 0;
+    const isMe = p === myName;
+    html += `
+      <div class="coop-player-tag ${isHost ? "host" : "guest"}">
+        <span>${isHost ? "👑" : "👤"}</span>
+        <strong>${escapeHtml(p)}</strong>
+        ${isMe ? "<small style='color:#00f2fe'>(Вы)</small>" : ""}
+      </div>
+    `;
+  });
+  listEl.innerHTML = html;
+
+  if (game.coopRole === "host") {
+    startBtn.classList.remove("hidden");
+    waitingMsg.classList.add("hidden");
+  } else {
+    startBtn.classList.add("hidden");
+    waitingMsg.classList.remove("hidden");
+  }
+}
+
+function leaveCoopLobby() {
+  game.coopRoom = null;
+  game.coopRole = "host";
+  game.coopPlayers = [];
+  game.remotePlayers = {};
+  updateCoopLobbyUI();
 }
 
 function togglePause() {
@@ -1564,128 +1961,173 @@ function handleEnemyDeath(e) {
 }
 
 // ============================================================================
-// ПРОКАЧКА УРОВНЯ ВО ВРЕМЯ ЗАБЕГА + ВИКТОРИНА «ПРОВЕРКА НА УМНИ»
+// ПРОКАЧКА УРОВНЯ ВО ВРЕМЯ ЗАБЕГА + ВИКТОРИНА «ПРОВЕРКА НА УМНИ» (C# ЭКЗАМЕН)
 // ============================================================================
 const QUIZ_QUESTIONS = [
+  // --- Model A ---
   {
-    q: "Какой SQL-оператор используется для выборки данных из таблицы?",
-    a: "SELECT",
-    w: ["INSERT", "UPDATE", "FETCH"],
+    q: "Какой из типов данных в C# является ссылочным (Reference Type)?",
+    a: "string",
+    w: ["int", "double", "bool"],
   },
   {
-    q: "Как расшифровывается СУБД?",
-    a: "Система управления базами данных",
-    w: ["Сервер удалённых баз данных", "Сеть универсальных блоков данных", "Служба упаковки больших данных"],
+    q: "Какое ключевое слово в C# запрещает наследование от класса?",
+    a: "sealed",
+    w: ["abstract", "static", "private"],
   },
   {
-    q: "Что делает ограничение PRIMARY KEY в таблице SQLite?",
-    a: "Уникально идентифицирует каждую запись в таблице",
-    w: ["Шифрует пароли пользователей", "Сортирует таблицу по алфавиту", "Разрешает хранить только текст"],
+    q: "Какой принцип чистого кода расшифровывается как «Don't Repeat Yourself»?",
+    a: "DRY",
+    w: ["KISS", "YAGNI", "SOLID"],
   },
   {
-    q: "Где SQLite хранит всю базу данных?",
-    a: "В одном обычном файле на диске (или в памяти)",
-    w: ["Только на облачном сервере Microsoft", "В реестре Windows", "В отдельных папках для каждой строки"],
+    q: "Какой модификатор доступа в C# разрешает доступ внутри класса и в производных классах?",
+    a: "protected",
+    w: ["private", "internal", "public"],
   },
   {
-    q: "Какая команда SQL добавляет новую строку в таблицу?",
-    a: "INSERT INTO",
-    w: ["ADD ROW", "APPEND TO", "CREATE ROW"],
+    q: "Какое утверждение верно для конструктора (Constructor) в C#?",
+    a: "Имя конструктора совпадает с именем класса",
+    w: ["Всегда возвращает тип void", "Обязан быть static", "Не может принимать параметры"],
   },
   {
-    q: "Какая команда SQL удаляет строки из таблицы по условию?",
-    a: "DELETE FROM",
-    w: ["REMOVE", "DROP COLUMN", "ERASE"],
+    q: "Какой вывод даст код: int x = 10; double y = 3; Console.Write(x / y); ?",
+    a: "3.3333333333333335 (вещественное деление)",
+    w: ["3 (целочисленное деление)", "0", "Ошибка компиляции"],
   },
   {
-    q: "Какое ключевое слово SQL используется для фильтрации строк по условию?",
-    a: "WHERE",
-    w: ["FILTER", "WHEN", "SEARCH"],
+    q: "Какое ключевое слово используется для метода, который не возвращает значение?",
+    a: "void",
+    w: ["null", "empty", "static"],
   },
   {
-    q: "Какой оператор SQL объединяет строки из двух таблиц по связующему полю?",
-    a: "JOIN",
-    w: ["MERGE", "LINK", "COMBINE"],
+    q: "В чем фундаментальная разница между class и struct в C#?",
+    a: "class — ссылочный тип (Heap), struct — значимый тип (Stack)",
+    w: ["class не поддерживает методы, struct поддерживает", "struct может наследоваться от class", "class всегда static"],
   },
   {
-    q: "Чему равно 2 в 10-й степени (2¹⁰)?",
-    a: "1024",
-    w: ["512", "2048", "1000"],
+    q: "Что нарушает принцип инкапсуляции (Encapsulation)?",
+    a: "Публичные изменяемые поля напрямую (public int balance;)",
+    w: ["Использование свойств { get; set; }", "Приватные поля с валидацией", "Методы доступа"],
   },
   {
-    q: "Сколько бит в одном байте?",
-    a: "8",
-    w: ["16", "4", "10"],
+    q: "Ключевое слово в базовом классе C#, разрешающее переопределение метода в наследнике?",
+    a: "virtual",
+    w: ["override", "new", "abstract"],
   },
   {
-    q: "Какой HTTP-код означает «Страница не найдена»?",
-    a: "404",
-    w: ["500", "200", "403"],
+    q: "Синтаксис автосвойства (Auto-implemented property) в C#:",
+    a: "public int Age { get; set; }",
+    w: ["public int Age();", "property int Age = get, set;", "public Age { auto; }"],
   },
   {
-    q: "Какой HTTP-метод обычно используется для отправки данных формы (авторизации)?",
-    a: "POST",
-    w: ["GET", "HEAD", "OPTIONS"],
+    q: "Какой тип данных рекомендуется для финансовых и денежных расчетов в C#?",
+    a: "decimal",
+    w: ["double", "float", "long"],
+  },
+
+  // --- Model B ---
+  {
+    q: "Какой из перечисленных типов в C# является значимым (Value Type)?",
+    a: "int",
+    w: ["string", "class", "array (массив)"],
   },
   {
-    q: "Какая сложность бинарного поиска в отсортированном массиве из N элементов?",
-    a: "O(log N)",
-    w: ["O(N²)", "O(N)", "O(1)"],
+    q: "Какое ключевое слово определяет контракт без реализации методов?",
+    a: "interface",
+    w: ["class", "struct", "enum"],
   },
   {
-    q: "Какой тип данных в Python является неизменяемым (immutable)?",
-    a: "tuple (кортеж)",
-    w: ["list (список)", "dict (словарь)", "set (множество)"],
+    q: "Какой принцип программирования означает «You Ain't Gonna Need It»?",
+    a: "YAGNI",
+    w: ["DRY", "KISS", "OOP"],
   },
   {
-    q: "Какая функция SQL возвращает количество строк?",
-    a: "COUNT(*)",
-    w: ["SUM(*)", "TOTAL()", "LENGTH()"],
+    q: "Какой модификатор доступа по умолчанию имеют члены класса в C#?",
+    a: "private",
+    w: ["public", "protected", "internal"],
   },
   {
-    q: "Какое ключевое слово SQL сортирует результаты по убыванию?",
-    a: "ORDER BY ... DESC",
-    w: ["SORT BY ... DOWN", "GROUP BY ... LOW", "ALIGN ... REVERSE"],
+    q: "Что произойдет, если в классе C# не объявить ни одного конструктора?",
+    a: "Компилятор автоматически предоставит конструктор по умолчанию без параметров",
+    w: ["Ошибка компиляции", "Нельзя будет создать объект через new", "Класс станет статическим"],
   },
   {
-    q: "Что означает буква A в принципе ACID для транзакций БД?",
-    a: "Atomicity (Атомарность)",
-    w: ["Authorization (Авторизация)", "Availability (Доступность)", "Automation (Автоматизация)"],
+    q: "Какое ключевое слово в C# используется для вызова конструктора базового класса?",
+    a: "base",
+    w: ["this", "super", "parent"],
   },
   {
-    q: "Какой тег HTML5 используется для рисования 2D/3D графики через JS?",
-    a: "<canvas>",
-    w: ["<paint>", "<render>", "<screen>"],
+    q: "Какая стандартная коллекция в C# хранит пары «ключ-значение»?",
+    a: "Dictionary<TKey, TValue>",
+    w: ["List<T>", "Queue<T>", "Array"],
   },
   {
-    q: "Чему равен квадратный корень из 144?",
-    a: "12",
-    w: ["14", "11", "16"],
+    q: "Что является прямым нарушением принципа KISS (Keep It Simple, Stupid)?",
+    a: "Сложная вложенная логика для решения простой тривиальной задачи",
+    w: ["Понятные имена переменных", "Разбиение кода на небольшие методы", "Использование стандартных функций"],
   },
   {
-    q: "Какой протокол работает поверх TCP и шифрует веб-трафик с помощью TLS?",
-    a: "HTTPS",
-    w: ["FTP", "UDP", "ARP"],
+    q: "Ключевое слово в C# для скрытия (hide) члена базового класса без полиморфизма?",
+    a: "new",
+    w: ["override", "virtual", "sealed"],
   },
   {
-    q: "Как называется внешний ключ для связи таблиц в реляционной БД?",
-    a: "FOREIGN KEY",
-    w: ["OUTER KEY", "REMOTE KEY", "SECOND KEY"],
+    q: "Какое ключевое слово используется для константы времени компиляции в C#?",
+    a: "const",
+    w: ["readonly", "static", "fixed"],
   },
   {
-    q: "Что выведет выражение Python: len('SQLite')?",
-    a: "6",
-    w: ["5", "7", "0"],
+    q: "В чем отличие readonly от const в C#?",
+    a: "readonly можно задать в конструкторе, const — только при объявлении",
+    w: ["readonly быстрее const", "const хранится в куче (Heap)", "readonly нельзя использовать в классах"],
   },
   {
-    q: "Какая структура данных работает по принципу LIFO (последним пришёл — первым ушёл)?",
-    a: "Стек (Stack)",
-    w: ["Очередь (Queue)", "Хеш-таблица", "Дерево"],
+    q: "Какой блок в C# используется для перехвата исключений (Exception handling)?",
+    a: "try-catch",
+    w: ["if-else", "switch-case", "check-catch"],
+  },
+
+  // --- Model C & Конспект ---
+  {
+    q: "Какое ключевое слово объявляет абстрактный класс, экземпляр которого нельзя создать?",
+    a: "abstract",
+    w: ["sealed", "virtual", "partial"],
   },
   {
-    q: "Чему равно 7 × 8?",
-    a: "56",
-    w: ["54", "48", "64"],
+    q: "Модификатор доступа в C# для доступа только внутри текущей сборки (проекта)?",
+    a: "internal",
+    w: ["protected", "private", "public"],
+  },
+  {
+    q: "Что такое перегрузка методов (Method Overloading) в C#?",
+    a: "Методы с одинаковым именем, но разными типами или количеством параметров",
+    w: ["Методы с разными именами, но одинаковыми параметрами", "Переопределение virtual метода через override", "Замена метода в производном классе"],
+  },
+  {
+    q: "Какой результат выведет код: int[] a = {10, 20}; Console.Write(a[1]); ?",
+    a: "20",
+    w: ["10", "0", "IndexOutOfRangeException"],
+  },
+  {
+    q: "Как в C# обозначается реализация интерфейса или наследование класса?",
+    a: ": (двоеточие)",
+    w: ["implements", "extends", "inherits"],
+  },
+  {
+    q: "В чем особенность параметра с модификатором out в методе C#?",
+    a: "Метод обязан присвоить параметру значение до выхода из метода",
+    w: ["Переменная обязана быть инициализирована до вызова", "Параметр передается только по значению", "Параметр всегда равен null"],
+  },
+  {
+    q: "Какая инструкция используется для досрочного выхода из цикла в C#?",
+    a: "break",
+    w: ["continue", "exit", "skip"],
+  },
+  {
+    q: "Что утверждает принцип полиморфизма в ООП?",
+    a: "Один интерфейс / базовый тип — множество различных реализаций",
+    w: ["Все классы обязаны быть статическими", "Запрет на наследование методов", "Хранение данных исключительно в стеке"],
   },
 ];
 
@@ -1934,8 +2376,48 @@ function updateGame(dt) {
   }
 
   // Спавн волн и работа оружия
-  updateWaveDirector(dt);
+  if (!game.isCoop || game.coopRole === "host") {
+    updateWaveDirector(dt);
+  }
   updateWeapons(dt);
+
+  // Сетевая синхронизация кооператива (15 раз в секунду)
+  if (game.isCoop) {
+    const now = performance.now();
+    if (now - game.lastSyncTime > 65) {
+      game.lastSyncTime = now;
+      network.send({
+        type: "player_sync",
+        x: Math.round(p.x),
+        y: Math.round(p.y),
+        hp: Math.round(p.hp),
+        maxHp: p.maxHp,
+        facingX: p.facingX,
+        facingY: p.facingY,
+        level: p.level,
+      });
+
+      // Если мы хост — отправляем снепшот врагов
+      if (game.coopRole === "host") {
+        const enemyData = game.enemies.map((e) => [
+          Math.round(e.x),
+          Math.round(e.y),
+          e.radius,
+          Math.round(e.hp),
+          e.maxHp,
+          e.type,
+          e.color,
+          e.shape,
+        ]);
+        network.send({
+          type: "host_sync",
+          time: game.time,
+          kills: game.kills,
+          enemies: enemyData,
+        });
+      }
+    }
+  }
 
   // Обновление снарядов игрока
   for (let i = game.projectiles.length - 1; i >= 0; i--) {
@@ -2484,6 +2966,8 @@ function renderGame() {
     ctx.fill();
 
     ctx.restore();
+
+
   }
 
   // 2. АУРА ИСКАЖЕНИЯ (WARP FIELD)
@@ -2521,6 +3005,8 @@ function renderGame() {
     ctx.stroke();
     ctx.restore();
 
+
+
     ctx.strokeStyle = "rgba(0, 242, 254, 0.65)";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -2528,6 +3014,8 @@ function renderGame() {
     ctx.stroke();
 
     ctx.restore();
+
+
   }
 
   // 3. КРИСТАЛЛЫ ОПЫТА, МОНЕТЫ И БОНУСЫ (PICKUPS)
@@ -2642,6 +3130,8 @@ function renderGame() {
     }
 
     ctx.restore();
+
+
   }
 
   // 4. ДЕТАЛИЗИРОВАННЫЕ ВРАГИ (С КИБЕР-ТЕКСТУРАМИ)
@@ -2844,6 +3334,8 @@ function renderGame() {
     }
 
     ctx.restore();
+
+
   }
 
   // 5. ОРБИТАЛЬНЫЕ КЛИНКИ (CYBER GLAIVES С ОРБИТАЛЬНЫМИ ШЛЕЙФАМИ)
@@ -2889,6 +3381,8 @@ function renderGame() {
         ctx.lineWidth = 1;
         ctx.stroke();
         ctx.restore();
+
+
       }
 
       ctx.fillStyle = "#0f172a";
@@ -2905,6 +3399,8 @@ function renderGame() {
       ctx.fill();
 
       ctx.restore();
+
+
     }
   }
 
@@ -2933,6 +3429,8 @@ function renderGame() {
     ctx.stroke();
 
     ctx.restore();
+
+
   }
 
   // 7. ЦЕПНАЯ МОЛНИЯ (МНОГОСЛОЙНЫЙ ВЫСОКОВОЛЬТНЫЙ РАЗРЯД)
@@ -3012,6 +3510,8 @@ function renderGame() {
     ctx.fill();
 
     ctx.restore();
+
+
   }
 
   for (const ep of game.enemyProjectiles) {
@@ -3039,6 +3539,8 @@ function renderGame() {
     ctx.arc(0, 0, ep.radius * 0.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
+
+
   }
 
   // 9. ИГРОК (КИБЕР-НИНДЗЯ / МЕХ-ВЫЖИВШИЙ)
@@ -3116,6 +3618,8 @@ function renderGame() {
 
   ctx.restore();
 
+
+
   if (p.invulnTimer > 0) {
     const shieldR = p.radius * 2.1;
     const shieldGrad = ctx.createRadialGradient(0, 0, shieldR * 0.6, 0, 0, shieldR);
@@ -3138,6 +3642,70 @@ function renderGame() {
 
   ctx.restore();
 
+  // 9.1. РЕНДЕР ДРУГИХ ИГРОКОВ В КООПЕРАТИВЕ
+  if (game.isCoop) {
+    Object.keys(game.remotePlayers).forEach((uname) => {
+      const rp = game.remotePlayers[uname];
+      if (!rp) return;
+
+      ctx.save();
+      ctx.translate(rp.x, rp.y);
+
+      // Тень напарника
+      ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+      ctx.beginPath();
+      ctx.ellipse(0, 14, 18, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Неоновое свечение напарника (фиолетово-розовый оттенок)
+      const rpGlow = ctx.createRadialGradient(0, 0, 4, 0, 0, 36);
+      rpGlow.addColorStop(0, "rgba(217, 70, 239, 0.45)");
+      rpGlow.addColorStop(1, "rgba(217, 70, 239, 0)");
+      ctx.fillStyle = rpGlow;
+      ctx.beginPath();
+      ctx.arc(0, 0, 36, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Тело напарника
+      const rAngle = Math.atan2(rp.facingY, rp.facingX);
+      ctx.save();
+      ctx.rotate(rAngle);
+
+      ctx.fillStyle = "#1e1035";
+      ctx.strokeStyle = "#d946ef";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Визор напарника
+      ctx.fillStyle = "#ffd166";
+      ctx.beginPath();
+      ctx.arc(8, 0, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+
+      // Ник и полоска HP над головой напарника
+      ctx.font = "900 12px system-ui, sans-serif";
+      ctx.fillStyle = "#d946ef";
+      ctx.textAlign = "center";
+      ctx.fillText(uname, 0, -28);
+
+      const hpW = 34;
+      const hpRatio = Math.max(0, Math.min(1, rp.hp / (rp.maxHp || 100)));
+      ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.fillRect(-hpW / 2, -22, hpW, 4);
+      ctx.fillStyle = "#06d6a0";
+      ctx.fillRect(-hpW / 2, -22, hpW * hpRatio, 4);
+
+      ctx.restore();
+    });
+  }
+
+
+
   // 10. ЧАСТИЦЫ И ЦИФРЫ УРОНА
   for (const pt of game.particles) {
     ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
@@ -3156,6 +3724,8 @@ function renderGame() {
   ctx.globalAlpha = 1;
 
   ctx.restore();
+
+
 }
 
 function updateHud() {
@@ -3314,6 +3884,60 @@ function initEvents() {
           btnSync.classList.remove("syncing");
           btnSync.textContent = "☁️ Git Sync";
         }, 2800);
+      }
+    });
+  }
+
+  // Кнопки кооперативного режима
+  const btnCreateRoom = document.getElementById("btnCreateCoopRoom");
+  const btnJoinRoom = document.getElementById("btnJoinCoopRoom");
+  const btnLeaveRoom = document.getElementById("btnLeaveCoopRoom");
+  const btnStartCoop = document.getElementById("btnStartCoopGame");
+  const inputRoomCode = document.getElementById("inputCoopCode");
+
+  if (btnCreateRoom) {
+    btnCreateRoom.addEventListener("click", () => {
+      const myName = appState.user?.username || "Host";
+      if (network.isGitHubPages()) {
+        network.createRoomP2P(myName);
+      } else {
+        network.connect();
+        setTimeout(() => {
+          network.send({ type: "create_room", username: myName });
+        }, network.connected ? 0 : 250);
+      }
+    });
+  }
+
+  if (btnJoinRoom) {
+    btnJoinRoom.addEventListener("click", () => {
+      const code = (inputRoomCode?.value || "").trim();
+      if (!code) {
+        alert("Введите код комнаты!");
+        return;
+      }
+      const myName = appState.user?.username || "Guest";
+      if (network.isGitHubPages()) {
+        network.joinRoomP2P(code, myName);
+      } else {
+        network.connect();
+        setTimeout(() => {
+          network.send({ type: "join_room", room: code, username: myName });
+        }, network.connected ? 0 : 250);
+      }
+    });
+  }
+
+  if (btnLeaveRoom) {
+    btnLeaveRoom.addEventListener("click", () => {
+      leaveCoopLobby();
+    });
+  }
+
+  if (btnStartCoop) {
+    btnStartCoop.addEventListener("click", () => {
+      if (game.coopRole === "host" && game.coopRoom) {
+        network.send({ type: "start_game" });
       }
     });
   }
